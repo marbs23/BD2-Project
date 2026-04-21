@@ -23,6 +23,15 @@ RECORDS_PER_PAGE = PAGE_SIZE // RECORD_SIZE  # aproximadamente 128 registros por
 # guarda = [registros_principal (int), registros_auxiliares (int),
 #           puntero_principal (int), puntero_auxiliar (int)]
 # este header nos dice dónde empezar a leer la base de datos de forma ordenada
+# valores que pueden tomar:#
+# 1. cant_prin (int): cantidad de registros en el ARCHIVO PRINCIPAL
+#    nos sirve para saber el límite de la búsqueda binaria
+# 2. cant_aux (int): cantidad de registros en el ARCHIVO AUXILIAR (overflow)
+#    nos indica cuándo el archivo auxiliar llega al valor "K" y necesita un rebuild
+# 3. prim_arc (int): Indica en qué archivo está el registro más pequeño de TODOS.
+#    valores: 0 = archivo principal | 1 = archivo auxiliar | -1 = tabla vacía
+# 4. prim_pos (int): indica la posición física (índice) del primer registro
+#    si prim_arc es 0, es la posición en el principal. si es 1, es en el auxiliar
 HEADER_FORMAT = "iiii"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
@@ -56,6 +65,15 @@ class SeqFile:
             # no escribimos el header, solo lo leeremos cuando necesitemos saber cuántos registros hay
 
     # 2) lectura desde csv
+    # cada registro guarda dos valores que indican quién es el siguiente en el orden lógico:
+    # 1. next_file (int): ¿en qué archivo vive el siguiente registro con el id más cercano?
+    #    valores:
+    #      0 -> el siguiente está en el ARCHIVO PRINCIPAL
+    #      1 -> el siguiente está en el ARCHIVO AUXILIAR (overflow)
+    #     -1 -> no hay siguiente (este es el FINAL de la cadena lógica)
+    # 2. next_pos (int): ¿cuál es la posición física (índice) dentro de ese archivo?
+    #    ejemplo: si next_file es 1 y next_pos es 3, el siguiente registro es
+    #    el que está en el índice 3 del archivo auxiliar
     @classmethod
     def from_csv(cls, filename: str, csv_path: str, k_desorted: int = 100):
         records = []
@@ -73,18 +91,18 @@ class SeqFile:
         obj.file.seek(obj.HEADER_SIZE) # nos ubicamos en la cabecera
         obj.file.truncate() # borramos lo de abajo de donde estamos
         # 4. empaquetamos y escribimos los registros uno tras otro
-        total_records = len(records_list)
+        total_records = len(records)
         for i in range(total_records):
             # si no es el último, el puntero apunta al siguiente registro físico
             if i < total_records - 1:
-                records_list[i].next_file = 0 # 0 significa archivo principal
-                records_list[i].next_pos = i + 1
+                records[i].next_file = 0 # 0 significa archivo principal
+                records[i].next_pos = i + 1
             else:
                 # el último registro de la cadena apunta a -1 (final)
-                records_list[i].next_file = -1
-                records_list[i].next_pos = -1
+                records[i].next_file = -1
+                records[i].next_pos = -1
             # escribir al disco (usando nuestro pack_record que ya tiene punteros)
-            obj.file.write(obj._pack_record(records_list[i]))
+            obj.file.write(obj._pack_record(records[i]))
             obj.write_count += 1 # opcional: contar esto como escrituras de página si lo haces en bloque
         # 5. actualizar el header
         # parametros: cant_prin, cant_aux, prim_arc, prim_pos
@@ -95,10 +113,12 @@ class SeqFile:
     # 3) lectura de una página
     def _read_page(self, is_aux: bool, page_id: int) -> bytes:
         target_file = self.aux_file if is_aux else self.file # archivo a leer
-        # calculamos el offset y nos ubicamos en la página
-        target_file.seek(self._offset(target_file, is_aux))
+        # calculamos el offset
+        base_offset = HEADER_SIZE if not is_aux else 0
+        offset = base_offset + (page_id * PAGE_SIZE)
+        target_file.seek(offset) #nos ubicamos en la página
         self.read_count += 1 # contamos acceso al bloque del header
-        return target_file.read(PAGE_SIZE)
+        return target_file.read(PAGE_SIZE) # leemos la página
 
     # 4) lectura del header
     def _read_header(self) -> Tuple[int, int, int, int]:
@@ -147,7 +167,7 @@ class SeqFile:
         else: # en el principal saltamos el header
             return HEADER_SIZE + index * RECORD_SIZE
 
-    # 9) leer un registro
+    # 9) leer un registro en una página
     def _read_record(self, index: int, is_aux: bool) -> Record:
         # calculamos en qué página está el registro
         page_id = index // RECORDS_PER_PAGE
@@ -159,7 +179,7 @@ class SeqFile:
         # desempaquetamos los datos del registro
         return self._unpack_record(record_bytes)
 
-    # 10) escribir un registro
+    # 10) escribir un registro en una página
     def _write_record(self, index: int, is_aux: bool, rec: Record):
         # ubicamos el archivo a escribir
         target_file = self.aux_file if is_aux else self.file
@@ -195,10 +215,17 @@ class SeqFile:
 
     # 12) búsqueda
     def search(self, id_key: int) -> Optional[Record]:
+        cant_prin, cant_aux, prim_arc, prim_pos = self._read_header()
+        if prim_arc != -1: # si la tabla está totalmente vacía
+            # leemos el primer registro lógico de la cadena
+            # prim_arc == 1: true si el primer registro está en el auxiliar y a false si está en el principal
+            first_rec = self._read_record(prim_pos, prim_arc==1)
+            if first_rec.id == id_key: # si el id que buscamos es justo el primero de la cadena
+                return first_rec # lo devolvemos
         # intentamos búsqueda binaria en el principal
         res_record, idx = self.binary_search(id_key)
         if res_record is not None:
-            return res_record
+            return res_record # si encontramos el registro, lo devolvemos
         # si no es el id exacto, el binary_search nos dio el "predecesor"
         if idx != -1: # seguimos la cadena de punteros
             current_rec = self._read_record(idx, is_aux=False)
@@ -225,3 +252,14 @@ class SeqFile:
     def close(self):
         self.file.flush() # guardamos los cambios en el disco
         self.file.close()
+
+    # 18) métricas para el informe y la ui
+    def get_stats(self):
+        return {"reads": self.read_count,
+                "writes": self.write_count,
+                "total_io": self.read_count + self.write_count}
+
+    # 19) resetear las estadísticas
+    def reset_stats(self):
+        self.read_count = 0
+        self.write_count = 0
