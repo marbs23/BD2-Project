@@ -241,6 +241,64 @@ class SeqFile:
         return None # si no encontramos el registro, devuelve None
 
     # 13) insertar un registro
+    def add(self, record: Record):
+        # leemos el header para conocer el estado actual
+        cant_prin, cant_aux, prim_arc, prim_pos = self._read_header()
+        # caso a: la tabla está vacía
+        if prim_arc == -1:
+            # el primer registro no tiene a nadie después de él
+            record.next_file = -1
+            record.next_pos = -1
+            # lo guardamos en la primera posición del archivo principal
+            self._write_record(0, is_aux=False, rec=record)
+            # actualizamos el header: 1 en principal, 0 en aux, y la cadena empieza en (0,0)
+            self._write_header(1, 0, 0, 0)
+            return
+        # buscamos el índice del registro con el id más cercano (menor) al que queremos insertar
+        _, pred_idx = self.binary_search(record.id)
+        # caso b: el nuevo registro tiene el id más pequeño de toda la tabla (su predecesor no existe)
+        if pred_idx == -1:
+            # el nuevo registro apunta al que antes era el primero
+            record.next_file = prim_arc
+            record.next_pos = prim_pos
+            # guardamos el nuevo registro al final del archivo auxiliar
+            self._write_record(cant_aux, is_aux=True, rec=record)
+            # el header ahora dice que el inicio de la tabla está en el auxiliar
+            self._write_header(cant_prin, cant_aux + 1, 1, cant_aux)
+            # caso c: inserción normal en medio o al final de la cadena
+        else:
+
+            # ---- no revisado
+            # rastreamos ubicación física del predecesor
+            curr_arc = 0 # empezamos asumiendo que está en principal (por la búsqueda binaria)
+            curr_pos = pred_idx
+            actual = self._read_record(curr_pos, is_aux=False)
+            # recorremos la cadena en el auxiliar si el predecesor tiene hijos allí
+            while actual.next_file != -1:
+                sig_temp = self._read_record(actual.next_pos, actual.next_file == 1)
+                if sig_temp.id > record.id: # si el siguiente ya es mayor, encontramos el hueco
+                    break
+                # avanzamos el rastro
+                curr_arc = actual.next_file
+                curr_pos = actual.next_pos
+                actual = sig_temp
+            # "actual" es ahora nuestro predecesor inmediato
+            # el nuevo registro hereda el "hijo" del predecesor
+            record.next_file = actual.next_file
+            record.next_pos = actual.next_pos
+            # escribimos el nuevo registro al final del auxiliar
+            new_pos_in_aux = cant_aux
+            self._write_record(new_pos_in_aux, is_aux=True, rec=record)
+            # actualizamos el puntero del predecesor para que mire al nuevo
+            actual.next_file = 1 # ahora apunta al auxiliar
+            actual.next_pos = new_pos_in_aux
+            # reescritura: guardamos el predecesor con su nuevo puntero en su lugar original
+            self._write_record(curr_pos, is_aux=(curr_arc == 1), rec=actual)
+            # actualizamos metadatos en el header (+1 en auxiliar)
+            self._write_header(cant_prin, cant_aux + 1, prim_arc, prim_pos)
+        # verificamos si el área auxiliar se llenó (K)
+        if (cant_aux + 1) >= self.k_desorted:
+            self.rebuild() # si es necesario, aplicar reconstrucción
 
     # 14) eliminar un registro
 
