@@ -301,43 +301,43 @@ class SeqFile:
         if (cant_aux + 1) >= self.k_desorted:
             self.rebuild() # si es necesario, aplicar reconstrucción
 
-        # 14) eliminar un registro
-        def remove(self, id_key: int) -> bool:
-            # utilizamos la función search que busca en el principal y en el auxiliar siguiendo el orden lógico
-            registro_encontrado = self.search(id_key)
-            if registro_encontrado is None:
-                return False # si el registro no existe en la cadena, no hay nada que eliminar
-            # para eliminarlo lógicamente, cambiamos su id a -1
-            registro_encontrado.id = -1
-            # necesitamos saber dónde está físicamente para sobrescribirlo
-            # lo buscamos en el archivo principal con búsqueda binaria
-            _, idx_p = self.binary_search(id_key)
-            # leemos el registro de esa posición para confirmar que lo encontramos
-            temp_rec = self._read_record(idx_p, is_aux=False)
-            if temp_rec.id == id_key: # si el registro sí coincide
-                # sobreescribimos con su versión marcada como borrado
-                self._write_record(idx_p, is_aux=False, rec=registro_encontrado)
+    # 14) eliminar un registro
+    def remove(self, id_key: int) -> bool:
+        # utilizamos la función search que busca en el principal y en el auxiliar siguiendo el orden lógico
+        registro_encontrado = self.search(id_key)
+        if registro_encontrado is None:
+            return False # si el registro no existe en la cadena, no hay nada que eliminar
+        # para eliminarlo lógicamente, cambiamos su id a -1
+        registro_encontrado.id = -1
+        # necesitamos saber dónde está físicamente para sobrescribirlo
+        # lo buscamos en el archivo principal con búsqueda binaria
+        _, idx_p = self.binary_search(id_key)
+        # leemos el registro de esa posición para confirmar que lo encontramos
+        temp_rec = self._read_record(idx_p, is_aux=False)
+        if temp_rec.id == id_key: # si el registro sí coincide
+            # sobreescribimos con su versión marcada como borrado
+            self._write_record(idx_p, is_aux=False, rec=registro_encontrado)
+            return True # confirmamos que la eliminación fue exitosa y salimos
+        # si no estaba en el principal, tiene que estar en el auxiliar
+        # recorremos la cadena desde el inicio usando el header
+        cant_prin, cant_aux, p_arc, p_pos = self._read_header()
+        # inicializamos el rastro con el primer registro que nos indica el header
+        curr_arc = p_arc # curr_arc será 0 si empieza en principal o 1 si empieza en auxiliar
+        curr_pos = p_pos # curr_pos es el índice físico donde está el primer registro
+        while curr_arc != -1:
+            # leemos el registro de la posición actual (is_aux es true si curr_arc es 1)
+            rec = self._read_record(curr_pos, is_aux=(curr_arc == 1))
+            # comparamos si el registro que tenemos es el que queremos eliminar
+            if rec.id == id_key:
+                # si lo encontramos, lo sobreescribimos con su versión marcada como borrado
+                self._write_record(curr_pos, is_aux=(curr_arc == 1), rec=registro_encontrado)
                 return True # confirmamos que la eliminación fue exitosa y salimos
-            # si no estaba en el principal, tiene que estar en el auxiliar
-            # recorremos la cadena desde el inicio usando el header
-            cant_prin, cant_aux, p_arc, p_pos = self._read_header()
-            # inicializamos el rastro con el primer registro que nos indica el header
-            curr_arc = p_arc # curr_arc será 0 si empieza en principal o 1 si empieza en auxiliar
-            curr_pos = p_pos # curr_pos es el índice físico donde está el primer registro
-            while curr_arc != -1:
-                # leemos el registro de la posición actual (is_aux es true si curr_arc es 1)
-                rec = self._read_record(curr_pos, is_aux=(curr_arc == 1))
-                # comparamos si el registro que tenemos es el que queremos eliminar
-                if rec.id == id_key:
-                    # si lo encontramos, lo sobreescribimos con su versión marcada como borrado
-                    self._write_record(curr_pos, is_aux=(curr_arc == 1), rec=registro_encontrado)
-                    return True # confirmamos que la eliminación fue exitosa y salimos
-                # si no es el buscado, leemos sus punteros para saltar al siguiente registro
-                # actualizamos el archivo (principal o auxiliar) para la siguiente iteración
-                curr_arc = rec.next_file
-                # actualizamos la posición física para la siguiente iteración
-                curr_pos = rec.next_pos
-            return False # si el registro no existe físicamente, retorna False
+            # si no es el buscado, leemos sus punteros para saltar al siguiente registro
+            # actualizamos el archivo (principal o auxiliar) para la siguiente iteración
+            curr_arc = rec.next_file
+            # actualizamos la posición física para la siguiente iteración
+            curr_pos = rec.next_pos
+        return False # si el registro no existe físicamente, retorna False
 
     # 15) búsqueda por rango
 
