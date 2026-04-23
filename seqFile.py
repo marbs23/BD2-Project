@@ -267,36 +267,37 @@ class SeqFile:
             self._write_header(cant_prin, cant_aux + 1, 1, cant_aux)
             # caso c: inserción normal en medio o al final de la cadena
         else:
-
-            # ---- no revisado
-            # rastreamos ubicación física del predecesor
+            # variables para recordar dónde está físicamente el predecesor
             curr_arc = 0 # empezamos asumiendo que está en principal (por la búsqueda binaria)
             curr_pos = pred_idx
+            # leemos el registro que la búsqueda binaria marcó como posible predecesor
             actual = self._read_record(curr_pos, is_aux=False)
-            # recorremos la cadena en el auxiliar si el predecesor tiene hijos allí
+            # avanzamos por la cadena de punteros si el predecesor apunta al archivo auxiliar
             while actual.next_file != -1:
+                # leemos el siguiente registro en la secuencia lógica
                 sig_temp = self._read_record(actual.next_pos, actual.next_file == 1)
-                if sig_temp.id > record.id: # si el siguiente ya es mayor, encontramos el hueco
+                # si el siguiente ya es mayor que nuestro nuevo id, aquí es donde debemos insertar
+                if sig_temp.id > record.id:
                     break
-                # avanzamos el rastro
+                # si no, actualizamos el rastro de ubicación y seguimos avanzando
                 curr_arc = actual.next_file
                 curr_pos = actual.next_pos
                 actual = sig_temp
             # "actual" es ahora nuestro predecesor inmediato
-            # el nuevo registro hereda el "hijo" del predecesor
+            # el nuevo registro hereda el puntero (el "hijo") que tenía su predecesor
             record.next_file = actual.next_file
             record.next_pos = actual.next_pos
-            # escribimos el nuevo registro al final del auxiliar
+            # guardamos físicamente el nuevo registro al final del archivo auxiliar
             new_pos_in_aux = cant_aux
             self._write_record(new_pos_in_aux, is_aux=True, rec=record)
-            # actualizamos el puntero del predecesor para que mire al nuevo
-            actual.next_file = 1 # ahora apunta al auxiliar
+            # el predecesor ahora debe apuntar al nuevo registro que acabamos de guardar
+            actual.next_file = 1 # 1 indica que ahora el siguiente está en el auxiliar
             actual.next_pos = new_pos_in_aux
-            # reescritura: guardamos el predecesor con su nuevo puntero en su lugar original
+            # sobreescribimos el predecesor en su posición original con el puntero actualizado
             self._write_record(curr_pos, is_aux=(curr_arc == 1), rec=actual)
-            # actualizamos metadatos en el header (+1 en auxiliar)
+            # actualizamos el header sumando uno al conteo de registros auxiliares
             self._write_header(cant_prin, cant_aux + 1, prim_arc, prim_pos)
-        # verificamos si el área auxiliar se llenó (K)
+        # verificamos si el archivo auxiliar llegó al límite permitido para el desorden
         if (cant_aux + 1) >= self.k_desorted:
             self.rebuild() # si es necesario, aplicar reconstrucción
 
