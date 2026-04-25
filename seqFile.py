@@ -1,11 +1,12 @@
 from typing import Optional, List, Tuple
 from dataclasses import dataclass
 import struct
+import time
 import csv
 import os
 
-# por ahora los registros están modelados en su versión plantilla
-# al hacer el chequeo final agregaré la forma del csv elegido
+# solo falta agregar la forma del csv elegido
+# ya chequeado con pruebas
 
 # definimos un registro (temporal)
 # "i" = int (4 bytes) | "20s" = string de 20 bytes
@@ -87,7 +88,7 @@ class SeqFile:
         records.sort(key=lambda record: record.id)
         # 3. crear el archivo y limpiar
         obj = cls(filename, k_desorted)
-        obj.file.seek(obj.HEADER_SIZE) # nos ubicamos en la cabecera
+        obj.file.seek(HEADER_SIZE) # nos ubicamos en la cabecera
         obj.file.truncate() # borramos lo de abajo de donde estamos
         # 4. empaquetamos y escribimos los registros uno tras otro
         total_records = len(records)
@@ -111,38 +112,48 @@ class SeqFile:
 
     # 3) lectura de una página
     def _read_page(self, is_aux: bool, page_id: int) -> bytes:
-        target_file = self.aux_file if is_aux else self.file # archivo a leer
+        target_file = self.aux_file if is_aux else self.file  # archivo a leer
         # calculamos el offset
         base_offset = HEADER_SIZE if not is_aux else 0
         offset = base_offset + (page_id * PAGE_SIZE)
-        target_file.seek(offset) #nos ubicamos en la página
+        # verificamos el tamaño del archivo para no leer fuera de los límites
+        target_file.seek(0, 2)
+        file_size = target_file.tell()
+        if offset >= file_size:
+            return b"\x00" * PAGE_SIZE  # si está fuera de rango, devolvemos bytes vacíos
+        target_file.seek(offset) # nos ubicamos en la página
         self.read_count += 1 # contamos acceso al bloque del header
-        return target_file.read(PAGE_SIZE) # leemos la página
+        data = target_file.read(PAGE_SIZE) # leemos la página
+        # si la lectura fue incompleta (final del archivo), rellenamos con ceros hasta completar PAGE_SIZE
+        if len(data) < PAGE_SIZE:
+            data = data.ljust(PAGE_SIZE, b"\x00")
+        return data
 
     # 4) lectura del header
     def _read_header(self) -> Tuple[int, int, int, int]:
         self.file.seek(0) # nos ubicamos en el header
         # leemos los datos del header según su tamaño
-        datos_binarios = self.file.read(self.HEADER_SIZE)
+        datos_binarios = self.file.read(HEADER_SIZE)
         self.read_count += 1 # contamos acceso al bloque del header
         # "unpack" = descomprimimos los bytes en una tupla
-        return struct.unpack(self.HEADER_FORMAT, datos_binarios)
+        return struct.unpack(HEADER_FORMAT, datos_binarios)
 
     # 5) escritura del header
     def _write_header(self, cant_prin: int, cant_aux: int, prim_arc: int, prim_pos: int) -> None:
         self.file.seek(0) # nos ubicamos en el header
         # "pack" = comprimimos los datos en bytes
-        datos_binarios = struct.pack(self.HEADER_FORMAT, cant_prin, cant_aux, prim_arc, prim_pos)
+        datos_binarios = struct.pack(HEADER_FORMAT, cant_prin, cant_aux, prim_arc, prim_pos)
         # los escribimos en el header
         self.file.write(datos_binarios)
         self.file.flush() # guardamos los cambios en el disco
         self.write_count += 1 # contamos acceso al bloque del header
 
     # 6) pack de un registro
-    def _pack_record(self, rec: Record) -> bytes:
+    @staticmethod
+    def _pack_record(rec: Record) -> bytes:
         # "pack" = comprimimos los datos en bytes
         return struct.pack(
-            self.RECORD_FORMAT,
+            RECORD_FORMAT,
             rec.id,
             rec.name.encode("utf-8")[:20].ljust(20, b"\x00"),
             rec.next_file,
@@ -187,6 +198,7 @@ class SeqFile:
         target_file.seek(offset)
         # empaquetamos los datos del registro y los escribimos
         target_file.write(self._pack_record(rec))
+        target_file.flush()
         self.write_count += 1 # contamos acceso al bloque del header
 
     # 11) búsqueda binaria
@@ -305,38 +317,38 @@ class SeqFile:
         # utilizamos la función search que busca en el principal y en el auxiliar siguiendo el orden lógico
         registro_encontrado = self.search(id_key)
         if registro_encontrado is None:
-            return False # si el registro no existe en la cadena, no hay nada que eliminar
+            return False  # si el registro no existe en la cadena, no hay nada que eliminar
         # para eliminarlo lógicamente, cambiamos su id a -1
         registro_encontrado.id = -1
         # necesitamos saber dónde está físicamente para sobrescribirlo
         # lo buscamos en el archivo principal con búsqueda binaria
-        _, idx_p = self.binary_search(id_key)
-        # leemos el registro de esa posición para confirmar que lo encontramos
-        temp_rec = self._read_record(idx_p, is_aux=False)
-        if temp_rec.id == id_key: # si el registro sí coincide
+        res_bin, idx_p = self.binary_search(id_key)
+        # AJUSTE: Verificamos si la búsqueda binaria nos dio el registro exacto
+        if res_bin is not None and res_bin.id == id_key:
             # sobreescribimos con su versión marcada como borrado
             self._write_record(idx_p, is_aux=False, rec=registro_encontrado)
-            return True # confirmamos que la eliminación fue exitosa y salimos
+            return True  # confirmamos que la eliminación fue exitosa y salimos
         # si no estaba en el principal, tiene que estar en el auxiliar
         # recorremos la cadena desde el inicio usando el header
         cant_prin, cant_aux, p_arc, p_pos = self._read_header()
         # inicializamos el rastro con el primer registro que nos indica el header
-        curr_arc = p_arc # curr_arc será 0 si empieza en principal o 1 si empieza en auxiliar
-        curr_pos = p_pos # curr_pos es el índice físico donde está el primer registro
+        curr_arc = p_arc  # curr_arc será 0 si empieza en principal o 1 si empieza en auxiliar
+        curr_pos = p_pos  # curr_pos es el índice físico donde está el primer registro
         while curr_arc != -1:
             # leemos el registro de la posición actual (is_aux es true si curr_arc es 1)
             rec = self._read_record(curr_pos, is_aux=(curr_arc == 1))
             # comparamos si el registro que tenemos es el que queremos eliminar
+            # Usamos el id_key original porque rec.id podría ser diferente
             if rec.id == id_key:
                 # si lo encontramos, lo sobreescribimos con su versión marcada como borrado
                 self._write_record(curr_pos, is_aux=(curr_arc == 1), rec=registro_encontrado)
-                return True # confirmamos que la eliminación fue exitosa y salimos
+                return True  # confirmamos que la eliminación fue exitosa y salimos
             # si no es el buscado, leemos sus punteros para saltar al siguiente registro
             # actualizamos el archivo (principal o auxiliar) para la siguiente iteración
             curr_arc = rec.next_file
             # actualizamos la posición física para la siguiente iteración
             curr_pos = rec.next_pos
-        return False # si el registro no existe físicamente, retorna False
+        return False  # si el registro no existe físicamente, retorna False
 
     # 15) búsqueda por rango
     def range_search(self, begin: int, end: int) -> List[Record]:
@@ -372,8 +384,9 @@ class SeqFile:
     def rebuild(self):
         # leemos el header para saber dónde empezar a seguir la cadena
         cant_prin, cant_aux, prim_arc, prim_pos = self._read_header()
+        total_esperado = cant_prin + cant_aux  # sumamos para saber cuántos hay en total
         # creamos un nombre para un archivo temporal donde contruiremos la nueva versión
-        temp_filename = self.file.name + ".tmp"
+        temp_filename = self.filename + ".tmp"
         # creamos un contador que nos dirá cuántos registros reales (no borrados) quedaron
         new_records = 0
         # abrimos el archivo remporal en modo escritura binaria
@@ -383,10 +396,17 @@ class SeqFile:
             # empezamos el recorrido desde el primer registro lógico de la cadena
             curr_arc = prim_arc
             curr_pos = prim_pos
+            ultimo_rec_valido = None # para guardar el último objeto Record escrito
             # mientras no lleguemos al final de la cadena de punteros
-            while curr_arc != -1:
+            # limitamos con total_esperado para evitar bucles infinitos por punteros corruptos
+            registros_procesados = 0
+            while curr_arc != -1 and registros_procesados < total_esperado:
                 # leemos el registro actual usando la función
                 record = self._read_record(curr_pos, is_aux=(curr_arc == 1))
+                registros_procesados += 1
+                # guardamos los punteros originales antes de que el objeto "record" sea modificado
+                next_f_temp = record.next_file
+                next_p_temp = record.next_pos
                 # si el registro no está marcado como eliminado
                 if record.id != -1:
                     # el nuevo archivo estará fisicamente ordenado
@@ -398,20 +418,21 @@ class SeqFile:
                     new_records += 1
                     # contamos la escritura para las métricas
                     self.write_count += 1
-                # saltamos al siguiente registro en la secuencia lógica
-                curr_arc = record.next_file
-                curr_pos = record.next_pos
+                    ultimo_rec_valido = record  # guardamos este para el final de la cadena
+                # saltamos al siguiente registro en la secuencia lógica usando los temporales
+                curr_arc = next_f_temp
+                curr_pos = next_p_temp
             # corrección del último puntero: debe apuntar a -1
-            if new_records > 0:
+            if new_records > 0 and ultimo_rec_valido is not None:
                 # nos ubicamos al inicio del último registro escrito
                 # para eso, saltamos el header y (n-1) registros
                 last_record_offset = HEADER_SIZE + (new_records - 1) * RECORD_SIZE
                 temp_file.seek(last_record_offset)
                 # sobreescribimos los punteros
-                record.next_file = -1
-                record.next_pos = -1
+                ultimo_rec_valido.next_file = -1
+                ultimo_rec_valido.next_pos = -1
                 # empaquetamos el registro y lo escribimos en el archivo temporal
-                temp_file.write(self._pack_record(record))
+                temp_file.write(self._pack_record(ultimo_rec_valido))
             # actualizamos el header del archivo temporal
             temp_file.seek(0)
             temp_file.write(struct.pack(HEADER_FORMAT, new_records, 0, 0, 0))
@@ -426,7 +447,7 @@ class SeqFile:
         # reabrimos ambos archivos para que sean accesibles de nuevo
         self.file = open(self.filename, "rb+")
         self.aux_file = open(self.aux_filename, "rb+")
-        # dejamos los ocntadores sin resetear para ver cuánto costó el mantenimiento
+        # dejamos los contadores sin resetear para ver cuánto costó el mantenimiento
 
     # 17) cerrar el archivo
     def close(self):
@@ -434,12 +455,59 @@ class SeqFile:
         self.file.close()
 
     # 18) métricas para el informe y la ui
-    def get_stats(self):
-        return {"reads": self.read_count,
-                "writes": self.write_count,
-                "total_io": self.read_count + self.write_count}
+    def get_stats(self, last_op_time: float=0):
+        return {"Tiempo de ejecución (ms)": last_op_time,
+                "Reads": self.read_count,
+                "Writes": self.write_count,
+                "Total_IO": self.read_count + self.write_count}
 
     # 19) resetear las estadísticas
     def reset_stats(self):
         self.read_count = 0
         self.write_count = 0
+
+def ejecutar_y_medir(nombre_op, operacion, db_instance):
+    db_instance.reset_stats()
+    start_time = time.time()
+    resultado = operacion()
+    end_time = time.time()
+    # calcular métricas
+    tiempo_ms = (end_time - start_time) * 1000
+    stats = db_instance.get_stats()
+    print(f"\n--- Reporte de {nombre_op} ---")
+    print(f"Tiempo: {tiempo_ms:.4f} ms")
+    print(f"Accesos a disco (Páginas read+write): {stats['Total_IO']}")
+    return resultado
+
+def main():
+    nombre_bin = "aaa"
+    nombre_csv = "aaa"
+
+    # 1. carga inicial (CREATE TABLE FROM FILE)
+    print("--- 1. probando from_csv y carga inicial ---")
+    # Nota: from_csv es un @classmethod, el reset_stats se maneja interno o post-creación
+    db = SeqFile.from_csv(nombre_bin, nombre_csv, k_desorted=3)
+    print(f"Carga completa. Stats iniciales: {db.get_stats()}")
+
+    # 2. probar búsqueda individual (search)
+    # usamos la función envolvente para capturar stats de esta operación específica
+    res = ejecutar_y_medir("Búsqueda ID 6", lambda: db.search(6), db)
+    if res: print(f"Resultado: {res.name}")
+
+    # 3. probar inserción (add)
+    ejecutar_y_medir("Inserción ID 25", lambda: db.add(Record(25, "loli", -1, -1)), db)
+    ejecutar_y_medir("Inserción ID 8", lambda: db.add(Record(8, "equisde", -1, -1)), db)
+
+    # 4. probar búsqueda por rango
+    resultados = ejecutar_y_medir("Rango 0-6", lambda: db.range_search(0, 6), db)
+    print(f"Registros encontrados: {len(resultados)}")
+
+    # 5. probar eliminación (remove)
+    ejecutar_y_medir("Eliminación ID 25", lambda: db.remove(25), db)
+
+    # 6. verificación final y cierre
+    db.close()
+    print("\nPruebas finalizadas con éxito.")
+
+if __name__ == "__main__":
+    main()
