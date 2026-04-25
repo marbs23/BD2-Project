@@ -6,9 +6,8 @@ import os
 
 # por ahora los registros están modelados en su versión plantilla
 # al hacer el chequeo final agregaré la forma del csv elegido
-# tmb las funciones piden un bool : is_aux | evaluaré si esto es lo correcto o lo corregiré
 
-# definimos un registro
+# definimos un registro (temporal)
 # "i" = int (4 bytes) | "20s" = string de 20 bytes
 # "i" = sig_archivo (4 bytes) | "i" = sig_pos (4 bytes)
 # sig_archivo -> 0 para principal | 1 para auxiliar | -1 para el final de la cadena
@@ -370,6 +369,64 @@ class SeqFile:
         return resultados
 
     # 16) reconstruir el archivo para integrar el área auxiliar y eliminar registros borrados
+    def rebuild(self):
+        # leemos el header para saber dónde empezar a seguir la cadena
+        cant_prin, cant_aux, prim_arc, prim_pos = self._read_header()
+        # creamos un nombre para un archivo temporal donde contruiremos la nueva versión
+        temp_filename = self.file.name + ".tmp"
+        # creamos un contador que nos dirá cuántos registros reales (no borrados) quedaron
+        new_records = 0
+        # abrimos el archivo remporal en modo escritura binaria
+        with open(temp_filename, "wb") as temp_file:
+            # dejamos el espacio inicial para el nuevo header
+            temp_file.write(struct.pack(HEADER_FORMAT, 0, 0, 0, 0))
+            # empezamos el recorrido desde el primer registro lógico de la cadena
+            curr_arc = prim_arc
+            curr_pos = prim_pos
+            # mientras no lleguemos al final de la cadena de punteros
+            while curr_arc != -1:
+                # leemos el registro actual usando la función
+                record = self._read_record(curr_pos, is_aux=(curr_arc == 1))
+                # si el registro no está marcado como eliminado
+                if record.id != -1:
+                    # el nuevo archivo estará fisicamente ordenado
+                    # el siguiente registro estará justo en la posición de adelante
+                    record.next_file = 0
+                    record.next_pos = new_records + 1
+                    # empaquetamos el registro y lo escribimos en el archivo temporal
+                    temp_file.write(self._pack_record(record))
+                    new_records += 1
+                    # contamos la escritura para las métricas
+                    self.write_count += 1
+                # saltamos al siguiente registro en la secuencia lógica
+                curr_arc = record.next_file
+                curr_pos = record.next_pos
+            # corrección del último puntero: debe apuntar a -1
+            if new_records > 0:
+                # nos ubicamos al inicio del último registro escrito
+                # para eso, saltamos el header y (n-1) registros
+                last_record_offset = HEADER_SIZE + (new_records - 1) * RECORD_SIZE
+                temp_file.seek(last_record_offset)
+                # sobreescribimos los punteros
+                record.next_file = -1
+                record.next_pos = -1
+                # empaquetamos el registro y lo escribimos en el archivo temporal
+                temp_file.write(self._pack_record(record))
+            # actualizamos el header del archivo temporal
+            temp_file.seek(0)
+            temp_file.write(struct.pack(HEADER_FORMAT, new_records, 0, 0, 0))
+        # cerramos las conexiones actuales para poder reemplazar el archivo principal
+        self.file.close()
+        self.aux_file.close()
+        # reemplazamos el archivo principal por el temporal
+        os.replace(temp_filename, self.filename)
+        # vaciamos el archivo auxiliar (lo dejamos en 0 bytes)
+        with open(self.aux_filename, "wb") as f:
+            pass
+        # reabrimos ambos archivos para que sean accesibles de nuevo
+        self.file = open(self.filename, "rb+")
+        self.aux_file = open(self.aux_filename, "rb+")
+        # dejamos los ocntadores sin resetear para ver cuánto costó el mantenimiento
 
     # 17) cerrar el archivo
     def close(self):
