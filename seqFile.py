@@ -340,6 +340,34 @@ class SeqFile:
         return False # si el registro no existe físicamente, retorna False
 
     # 15) búsqueda por rango
+    def range_search(self, begin: int, end: int) -> List[Record]:
+        resultados = []
+        # usamos el binary_search para encontrar dónde empezaría el rango
+        # nos interesa el "menor más cercano" (idx) si el id exacto no está
+        _, idx = self.binary_search(begin)
+        # determinamos el punto de inicio real (si idx es -1, empezamos desde el header)
+        cant_prin, cant_aux, curr_arc, curr_pos = self._read_header()
+        # si la búsqueda binaria encontró un predecesor, empezamos desde ahí
+        if idx != -1:
+            curr_arc = 0 # empezamos en el principal
+            curr_pos = idx
+        # recorremos la cadena lógica saltando entre archivos
+        while curr_arc != -1:
+            # leemos el registro actual (esto suma +1 a tus lecturas de página)
+            rec = self._read_record(curr_pos, is_aux=(curr_arc == 1))
+            # si el id del registro está dentro del rango, lo agregamos
+            if begin <= rec.id <= end:
+                # solo agregamos registros que no estén marcados como borrados (-1)
+                if rec.id != -1:
+                    resultados.append(rec)
+            # si el id ya superó el límite superior del rango, podemos dejar de buscar
+            # esto es gracias a que la cadena siempre está ordenada lógicamente
+            if rec.id > end:
+                break
+            # avanzamos al siguiente registro siguiendo el puntero
+            curr_arc = rec.next_file
+            curr_pos = rec.next_pos
+        return resultados
 
     # 16) reconstruir el archivo para integrar el área auxiliar y eliminar registros borrados
 
