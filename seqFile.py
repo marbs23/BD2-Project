@@ -5,6 +5,8 @@ import time
 import csv
 import os
 
+# correcciones hechas =D
+
 # definimos un registro (según books.csv)
 # "i" = id (4 bytes) | "100s" = title (100 bytes)
 # "40s" = author (40 bytes) | "i" = pages (4 bytes)
