@@ -5,19 +5,18 @@ import time
 import csv
 import os
 
-# solo falta agregar la forma del csv elegido
-# ya chequeado con pruebas
-
-# definimos un registro (temporal)
-# "i" = int (4 bytes) | "20s" = string de 20 bytes
-# "i" = sig_archivo (4 bytes) | "i" = sig_pos (4 bytes)
-# sig_archivo -> 0 para principal | 1 para auxiliar | -1 para el final de la cadena
-RECORD_FORMAT = "i20sii"
-RECORD_SIZE = struct.calcsize(RECORD_FORMAT) # ahora es de 32 bytes
+# definimos un registro (según books.csv)
+# "i" = id (4 bytes) | "100s" = title (100 bytes)
+# "40s" = author (40 bytes) | "i" = pages (4 bytes)
+# "f" = rating (4 bytes) | "i" = year (4 bytes)
+# "i" = next_file (4 bytes) | "i" = next_pos (4 bytes)
+# next_file -> 0 para principal | 1 para auxiliar | -1 para el final de la cadena
+RECORD_FORMAT = "i100s40sifiii"
+RECORD_SIZE = struct.calcsize(RECORD_FORMAT) # ahora es de 164 bytes
 
 # definimos una página
 PAGE_SIZE = 4096
-RECORDS_PER_PAGE = PAGE_SIZE // RECORD_SIZE  # aproximadamente 128 registros por página
+RECORDS_PER_PAGE = PAGE_SIZE // RECORD_SIZE  # aproximadamente 24 registros por página
 
 # creamos el header
 # guarda = [registros_principal (int), registros_auxiliares (int),
@@ -38,9 +37,13 @@ HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 @dataclass
 class Record:
     id: int
-    name: str
-    next_file: int
-    next_pos: int
+    title: str
+    author: str
+    pages: int
+    rating: float
+    year: int
+    next_file: int = -1
+    next_pos: int = -1
 
 class SeqFile:
     # 1) constructor
@@ -75,19 +78,44 @@ class SeqFile:
     #    ejemplo: si next_file es 1 y next_pos es 3, el siguiente registro es
     #    el que está en el índice 3 del archivo auxiliar
     @classmethod
-    def from_csv(cls, filename: str, csv_path: str, k_desorted: int = 100):
+    def from_csv(cls, filename: str, csv_path: str, k_desorted: int = 100, limite: int = 2000000):
         records = []
         # 1. leer los datos del csv
         with open(csv_path, newline="", encoding='utf-8') as f:
-            reader = csv.reader(f, delimiter=";")
-            next(reader) # saltar encabezados del csv
-            for row in reader:
-                records.append(
-                    Record(int(row[0]), row[1], -1 , -1))
+            # usamos dictreader para reconocer las columnas por su nombre en la primera fila
+            reader = csv.DictReader(f)
+            for i, row in enumerate(reader):
+                if i >= limite:
+                    break
+                try:
+                    # extraemos el id (book_key)
+                    b_id = int(row["book_key"])
+                    # extraemos el titulo y autor (strings)
+                    title = row["title"]
+                    author = row["author"]
+                    # para los campos numericos, validamos si estan vacios para no romper el programa
+                    # si esta vacio, le asignamos 0 o 0.0 segun corresponda
+                    pages = int(row["pages"]) if row["pages"] else 0
+                    rating = float(row["average_rating"]) if row["average_rating"] else 0.0
+                    year = int(row["published_date"]) if row["published_date"] else 0
+                    # creamos el objeto record con todos los campos nuevos del libro
+                    records.append(Record(id=b_id, title=title, author=author,pages=pages, rating=rating, year=year))
+                except (ValueError, KeyError):
+                    # si una linea viene mal formateada o con ids no validos, la saltamos
+                    continue
         # 2. ordenar por id
+        # el sequential file requiere que el archivo principal nazca ordenado fisicamente
         records.sort(key=lambda record: record.id)
         # 3. crear el archivo y limpiar
         obj = cls(filename, k_desorted)
+        # limpiar archivo principal
+        obj.file.seek(0)
+        obj.file.truncate()
+        # escribir un header vacío temporal para que no falle el tamaño
+        obj.file.write(struct.pack(HEADER_FORMAT, 0, 0, -1, -1))
+        # LIMPIAR ARCHIVO AUXILIAR (esto es lo que te está fallando)
+        obj.aux_file.seek(0)
+        obj.aux_file.truncate()
         obj.file.seek(HEADER_SIZE) # nos ubicamos en la cabecera
         obj.file.truncate() # borramos lo de abajo de donde estamos
         # 4. empaquetamos y escribimos los registros uno tras otro
@@ -101,12 +129,14 @@ class SeqFile:
                 # el último registro de la cadena apunta a -1 (final)
                 records[i].next_file = -1
                 records[i].next_pos = -1
-            # escribir al disco (usando nuestro pack_record que ya tiene punteros)
+            # escribir al disco (usando nuestro pack_record que ahora maneja todos los campos del libro)
             obj.file.write(obj._pack_record(records[i]))
-            obj.write_count += 1 # opcional: contar esto como escrituras de página si lo haces en bloque
+            # sumamos una escritura por cada registro en la carga inicial (o podrias optimizarlo por paginas dps)
+            obj.write_count += 1
         # 5. actualizar el header
         # parametros: cant_prin, cant_aux, prim_arc, prim_pos
         # como es la primera carga, el primer registro lógico es el 0 del archivo principal
+        # reiniciamos los auxiliares a 0 porque acabamos de reconstruir el principal
         obj._write_header(total_records, 0, 0, 0)
         return obj
 
@@ -120,7 +150,7 @@ class SeqFile:
         target_file.seek(0, 2)
         file_size = target_file.tell()
         if offset >= file_size:
-            return b"\x00" * PAGE_SIZE  # si está fuera de rango, devolvemos bytes vacíos
+            return b"\x00" * PAGE_SIZE # si está fuera de rango, devolvemos bytes vacíos
         target_file.seek(offset) # nos ubicamos en la página
         self.read_count += 1 # contamos acceso al bloque del header
         data = target_file.read(PAGE_SIZE) # leemos la página
@@ -155,19 +185,28 @@ class SeqFile:
         return struct.pack(
             RECORD_FORMAT,
             rec.id,
-            rec.name.encode("utf-8")[:20].ljust(20, b"\x00"),
+            rec.title.encode('utf-8')[:100].ljust(100, b'\x00'),
+            rec.author.encode('utf-8')[:40].ljust(40, b'\x00'),
+            rec.pages,
+            rec.rating,
+            rec.year,
             rec.next_file,
             rec.next_pos)
 
     # 7) unpack de un registro
     @staticmethod
     def _unpack_record(data: bytes) -> Record:
-        rid, name, n_file, n_pos = struct.unpack(RECORD_FORMAT, data)
+        # descomprimimos todos los campos
+        values = struct.unpack(RECORD_FORMAT, data)
         return Record(
-            id=rid,
-            name=name.decode("utf-8").rstrip('\x00').strip(),
-            next_file=n_file,
-            next_pos=n_pos)
+            id=values[0],
+            title=values[1].decode('utf-8', errors="ignore").rstrip('\x00').strip(),
+            author=values[2].decode('utf-8', errors="ignore").rstrip('\x00').strip(),
+            pages=values[3],
+            rating=values[4],
+            year=values[5],
+            next_file=values[6],
+            next_pos=values[7])
 
     # 8) calcular offset de un registro
     @staticmethod
@@ -241,6 +280,8 @@ class SeqFile:
         if idx != -1: # seguimos la cadena de punteros
             current_rec = self._read_record(idx, is_aux=False)
             # mientras haya un siguiente y no nos hayamos pasado del id
+            max_pasos = cant_prin + cant_aux
+            pasos = 0
             while current_rec.next_file != -1:
                 # leemos el siguiente registro (ya sea en principal o ausxiliar)
                 next_rec = self._read_record(current_rec.next_pos, current_rec.next_file == 1)
@@ -249,6 +290,7 @@ class SeqFile:
                 if next_rec.id > id_key: # ya nos pasamos, no existe
                     break
                 current_rec = next_rec # actualizamos el registro actual para seguir la cadena
+                pasos += 1
         return None # si no encontramos el registro, devuelve None
 
     # 13) insertar un registro
@@ -284,16 +326,19 @@ class SeqFile:
             # leemos el registro que la búsqueda binaria marcó como posible predecesor
             actual = self._read_record(curr_pos, is_aux=False)
             # avanzamos por la cadena de punteros si el predecesor apunta al archivo auxiliar
-            while actual.next_file != -1:
+            max_pasos = cant_prin + cant_aux
+            pasos = 0
+            while actual.next_file != -1 and pasos < max_pasos:
                 # leemos el siguiente registro en la secuencia lógica
                 sig_temp = self._read_record(actual.next_pos, actual.next_file == 1)
                 # si el siguiente ya es mayor que nuestro nuevo id, aquí es donde debemos insertar
-                if sig_temp.id > record.id:
+                if sig_temp.id >= record.id:
                     break
                 # si no, actualizamos el rastro de ubicación y seguimos avanzando
                 curr_arc = actual.next_file
                 curr_pos = actual.next_pos
                 actual = sig_temp
+                pasos += 1
             # "actual" es ahora nuestro predecesor inmediato
             # el nuevo registro hereda el puntero (el "hijo") que tenía su predecesor
             record.next_file = actual.next_file
@@ -334,6 +379,8 @@ class SeqFile:
         # inicializamos el rastro con el primer registro que nos indica el header
         curr_arc = p_arc  # curr_arc será 0 si empieza en principal o 1 si empieza en auxiliar
         curr_pos = p_pos  # curr_pos es el índice físico donde está el primer registro
+        max_pasos = cant_prin + cant_aux
+        pasos = 0
         while curr_arc != -1:
             # leemos el registro de la posición actual (is_aux es true si curr_arc es 1)
             rec = self._read_record(curr_pos, is_aux=(curr_arc == 1))
@@ -348,6 +395,7 @@ class SeqFile:
             curr_arc = rec.next_file
             # actualizamos la posición física para la siguiente iteración
             curr_pos = rec.next_pos
+            pasos += 1
         return False  # si el registro no existe físicamente, retorna False
 
     # 15) búsqueda por rango
@@ -445,8 +493,8 @@ class SeqFile:
         with open(self.aux_filename, "wb") as f:
             pass
         # reabrimos ambos archivos para que sean accesibles de nuevo
-        self.file = open(self.filename, "rb+")
-        self.aux_file = open(self.aux_filename, "rb+")
+        self.file = open(self.filename, "r+b")
+        self.aux_file = open(self.aux_filename, "r+b")
         # dejamos los contadores sin resetear para ver cuánto costó el mantenimiento
 
     # 17) cerrar el archivo
@@ -456,10 +504,10 @@ class SeqFile:
 
     # 18) métricas para el informe y la ui
     def get_stats(self, last_op_time: float=0):
-        return {"Tiempo de ejecución (ms)": last_op_time,
-                "Reads": self.read_count,
-                "Writes": self.write_count,
-                "Total_IO": self.read_count + self.write_count}
+        return {"tiempo de ejecución (ms)": last_op_time,
+                "reads": self.read_count,
+                "writes": self.write_count,
+                "total_io": self.read_count + self.write_count}
 
     # 19) resetear las estadísticas
     def reset_stats(self):
@@ -474,40 +522,63 @@ def ejecutar_y_medir(nombre_op, operacion, db_instance):
     # calcular métricas
     tiempo_ms = (end_time - start_time) * 1000
     stats = db_instance.get_stats()
-    print(f"\n--- Reporte de {nombre_op} ---")
-    print(f"Tiempo: {tiempo_ms:.4f} ms")
-    print(f"Accesos a disco (Páginas read+write): {stats['Total_IO']}")
+    print(f"\n--- reporte de {nombre_op} ---")
+    print(f"tiempo: {tiempo_ms:.4f} ms")
+    print(f"accesos a disco (páginas read+write): {stats["total_io"]}")
     return resultado
 
 def main():
-    nombre_bin = "aaa"
-    nombre_csv = "aaa"
+    # nombres de archivos
+    nombre_bin = "books_data.bin"
+    nombre_csv = "books.csv"
 
-    # 1. carga inicial (CREATE TABLE FROM FILE)
-    print("--- 1. probando from_csv y carga inicial ---")
-    # Nota: from_csv es un @classmethod, el reset_stats se maneja interno o post-creación
-    db = SeqFile.from_csv(nombre_bin, nombre_csv, k_desorted=3)
-    print(f"Carga completa. Stats iniciales: {db.get_stats()}")
+    # 1. carga inicial (simulando CREATE TABLE FROM FILE)
+    print("--- 1. probando carga inicial desde books.csv ---")
+    # k_desorted=5 para ver el rebuild rápido si insertamos varios
+    db = SeqFile.from_csv(nombre_bin, nombre_csv, k_desorted=5, limite=50)
+    print(f"carga completa. stats de creación: {db.get_stats()}")
 
-    # 2. probar búsqueda individual (search)
-    # usamos la función envolvente para capturar stats de esta operación específica
-    res = ejecutar_y_medir("Búsqueda ID 6", lambda: db.search(6), db)
-    if res: print(f"Resultado: {res.name}")
+    # 2. probar búsqueda individual (buscamos el libro id 6 del csv)
+    res = ejecutar_y_medir("búsqueda id 6", lambda: db.search(6), db)
+    if res:
+        print(f"libro encontrado: {res.title} | autor: {res.author} | rating: {res.rating}")
+    else:
+        print("libro no encontrado")
 
-    # 3. probar inserción (add)
-    ejecutar_y_medir("Inserción ID 25", lambda: db.add(Record(25, "loli", -1, -1)), db)
-    ejecutar_y_medir("Inserción ID 8", lambda: db.add(Record(8, "equisde", -1, -1)), db)
+    # 3. probar inserción (añadimos un libro nuevo que no esté en el csv)
+    # usamos id 25 para que vaya al final o id 12 para probar intermedio
+    nuevo_libro = Record(
+        id=500,
+        title="enhypen yey",
+        author="mafer",
+        pages=7,
+        rating=5.0,
+        year=2020)
+    ejecutar_y_medir("inserción libro id 22", lambda: db.add(nuevo_libro), db)
 
-    # 4. probar búsqueda por rango
-    resultados = ejecutar_y_medir("Rango 0-6", lambda: db.range_search(0, 6), db)
-    print(f"Registros encontrados: {len(resultados)}")
+    # 4. probar búsqueda por rango (libros con id entre 1 y 5)
+    print("\n--- buscando libros en rango id [1 - 5] ---")
+    resultados = ejecutar_y_medir("rango 1-5", lambda: db.range_search(1, 5), db)
+    for libro in resultados:
+        print(f"  > [id {libro.id}] {libro.title}")
 
-    # 5. probar eliminación (remove)
-    ejecutar_y_medir("Eliminación ID 25", lambda: db.remove(25), db)
+    # 5. probar eliminación lógica (eliminamos el libro con id 500)
+    ejecutar_y_medir("eliminación id 500", lambda: db.remove(500), db)
 
-    # 6. verificación final y cierre
+    # verificamos que ya no existe
+    res_deleted = db.search(500)
+    print(f"¿existe el id 500 después de borrar?: {"sí" if res_deleted else "no (borrado lógico)"}")
+
+    # 6. forzar rebuild (insertamos más libros para superar k_desorted=5)
+    print("\n--- insertando más libros para forzar rebuild físico ---")
+    for i in range(30, 35):
+        db.add(Record(i, f"libro extra {i}", "autor x", 100, 4.0, 2022))
+
+    stats_final = db.get_stats()
+    print(f"\nestadísticas acumuladas finales: {stats_final}")
+
     db.close()
-    print("\nPruebas finalizadas con éxito.")
+    print("\npruebas finalizadas con éxito")
 
 if __name__ == "__main__":
     main()
