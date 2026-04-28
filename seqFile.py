@@ -5,8 +5,6 @@ import time
 import csv
 import os
 
-# faltan correcciones finales : search, remove, add
-
 # definimos un registro (según books.csv)
 # "i" = id (4 bytes) | "100s" = title (100 bytes)
 # "40s" = author (40 bytes) | "i" = pages (4 bytes)
@@ -268,32 +266,33 @@ class SeqFile:
     # 12) búsqueda
     def search(self, id_key: int) -> Optional[Record]:
         cant_prin, cant_aux, prim_arc, prim_pos = self._read_header()
-        if prim_arc != -1: # si la tabla está totalmente vacía
+        if prim_arc != -1:  # si la tabla está totalmente vacía
             # leemos el primer registro lógico de la cadena
             # prim_arc == 1: true si el primer registro está en el auxiliar y a false si está en el principal
-            first_rec = self._read_record(prim_pos, prim_arc==1)
-            if first_rec.id == id_key: # si el id que buscamos es justo el primero de la cadena
-                return first_rec # lo devolvemos
+            first_rec = self._read_record(prim_pos, prim_arc == 1)
+            if first_rec.id == id_key:  # si el id que buscamos es justo el primero de la cadena
+                return first_rec  # lo devolvemos
         # intentamos búsqueda binaria en el principal
         res_record, idx = self.binary_search(id_key)
         if res_record is not None:
-            return res_record # si encontramos el registro, lo devolvemos
+            return res_record  # si encontramos el registro, lo devolvemos
         # si no es el id exacto, el binary_search nos dio el "predecesor"
-        if idx != -1: # seguimos la cadena de punteros
+        if idx != -1:  # seguimos la cadena de punteros
             current_rec = self._read_record(idx, is_aux=False)
-            # mientras haya un siguiente y no nos hayamos pasado del id
+            # calculamos el máximo de pasos posibles para no colgarnos si hay un puntero corrupto
             max_pasos = cant_prin + cant_aux
             pasos = 0
-            while current_rec.next_file != -1:
-                # leemos el siguiente registro (ya sea en principal o ausxiliar)
+            # cortamos cuando superamos el total de registros posibles
+            while current_rec.next_file != -1 and pasos < max_pasos:
+                # leemos el siguiente registro (ya sea en principal o auxiliar)
                 next_rec = self._read_record(current_rec.next_pos, current_rec.next_file == 1)
                 if next_rec.id == id_key:
                     return next_rec
-                if next_rec.id > id_key: # ya nos pasamos, no existe
+                if next_rec.id > id_key:  # ya nos pasamos, no existe
                     break
-                current_rec = next_rec # actualizamos el registro actual para seguir la cadena
+                current_rec = next_rec  # actualizamos el registro actual para seguir la cadena
                 pasos += 1
-        return None # si no encontramos el registro, devuelve None
+        return None  # si no encontramos el registro, devuelve None
 
     # 13) insertar un registro
     def add(self, record: Record):
@@ -364,30 +363,30 @@ class SeqFile:
         # utilizamos la función search que busca en el principal y en el auxiliar siguiendo el orden lógico
         registro_encontrado = self.search(id_key)
         if registro_encontrado is None:
-            return False  # si el registro no existe en la cadena, no hay nada que eliminar
+            return False # si el registro no existe en la cadena, no hay nada que eliminar
         # para eliminarlo lógicamente, cambiamos su id a -1
         registro_encontrado.id = -1
         # necesitamos saber dónde está físicamente para sobrescribirlo
         # lo buscamos en el archivo principal con búsqueda binaria
         res_bin, idx_p = self.binary_search(id_key)
-        # AJUSTE: Verificamos si la búsqueda binaria nos dio el registro exacto
+        # verificamos si la búsqueda binaria nos dio el registro exacto
         if res_bin is not None and res_bin.id == id_key:
             # sobreescribimos con su versión marcada como borrado
             self._write_record(idx_p, is_aux=False, rec=registro_encontrado)
-            return True  # confirmamos que la eliminación fue exitosa y salimos
+            return True # confirmamos que la eliminación fue exitosa y salimos
         # si no estaba en el principal, tiene que estar en el auxiliar
         # recorremos la cadena desde el inicio usando el header
         cant_prin, cant_aux, p_arc, p_pos = self._read_header()
         # inicializamos el rastro con el primer registro que nos indica el header
-        curr_arc = p_arc  # curr_arc será 0 si empieza en principal o 1 si empieza en auxiliar
-        curr_pos = p_pos  # curr_pos es el índice físico donde está el primer registro
+        curr_arc = p_arc # curr_arc será 0 si empieza en principal o 1 si empieza en auxiliar
+        curr_pos = p_pos # curr_pos es el índice físico donde está el primer registro
+        # cortamos con max_pasos como techo seguro
         max_pasos = cant_prin + cant_aux
         pasos = 0
-        while curr_arc != -1:
+        while curr_arc != -1 and pasos < max_pasos:
             # leemos el registro de la posición actual (is_aux es true si curr_arc es 1)
             rec = self._read_record(curr_pos, is_aux=(curr_arc == 1))
             # comparamos si el registro que tenemos es el que queremos eliminar
-            # Usamos el id_key original porque rec.id podría ser diferente
             if rec.id == id_key:
                 # si lo encontramos, lo sobreescribimos con su versión marcada como borrado
                 self._write_record(curr_pos, is_aux=(curr_arc == 1), rec=registro_encontrado)
@@ -548,7 +547,6 @@ def main():
         print("libro no encontrado")
 
     # 3. probar inserción (añadimos un libro nuevo que no esté en el csv)
-    # usamos id 25 para que vaya al final o id 12 para probar intermedio
     nuevo_libro = Record(
         id=500,
         title="enhypen yey",
@@ -556,7 +554,7 @@ def main():
         pages=7,
         rating=5.0,
         year=2020)
-    ejecutar_y_medir("inserción libro id 22", lambda: db.add(nuevo_libro), db)
+    ejecutar_y_medir("inserción libro id 500", lambda: db.add(nuevo_libro), db)
 
     # 4. probar búsqueda por rango (libros con id entre 1 y 5)
     print("\n--- buscando libros en rango id [1 - 5] ---")
