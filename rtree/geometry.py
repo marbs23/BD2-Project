@@ -1,3 +1,4 @@
+import math
 import struct
 from typing import NamedTuple
 
@@ -11,7 +12,7 @@ class MBR:
     __slots__ = ("min_lon", "max_lon", "min_lat", "max_lat")
 
     _PACK_FMT = "<4d"
-    _PACK_SIZE = struct.calcsize(_PACK_FMT)
+    _PACK_SIZE = struct.calcsize(_PACK_FMT)  # 32 bytes
 
     def __init__(self, min_lon: float, max_lon: float, min_lat: float, max_lat: float):
         self.min_lon = min_lon
