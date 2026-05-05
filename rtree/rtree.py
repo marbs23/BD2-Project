@@ -418,6 +418,83 @@ class RTree:
                 n += 1
         return n
 
+    def validate_structure(self) -> dict:
+        """Auditoría estructural. Lanza AssertionError si la estructura es inválida.
+
+        Verifica:
+          - todas las hojas están al mismo nivel
+          - MBR de cada padre contiene la unión de MBRs de sus hijos
+          - parent_pid es consistente
+          - fill factor: nodos no-root tienen >= m y <= M entries (root excepto)
+          - no hay ciclos
+        Devuelve métricas: depth, n_nodes, n_leaves, n_entries, total_overlap_area, total_dead_area.
+        """
+        root_pid = self._root_pid()
+        leaf_levels: set = set()
+        n_nodes = 0
+        n_leaves = 0
+        n_entries = 0
+        total_overlap = 0.0
+        total_dead = 0.0
+        seen: set = set()
+
+        def visit(pid: int, expected_parent: int, expected_level: Optional[int] = None):
+            nonlocal n_nodes, n_leaves, n_entries, total_overlap, total_dead
+            assert pid not in seen, f"cycle detected at pid={pid}"
+            seen.add(pid)
+            node = self._read_node(pid)
+            n_nodes += 1
+            assert node.parent_pid == expected_parent, (
+                f"node {pid} has parent_pid={node.parent_pid}, expected {expected_parent}"
+            )
+            if pid != root_pid:
+                assert m <= len(node.entries) <= M, (
+                    f"node {pid} fill violation: {len(node.entries)} entries (m={m}, M={M})"
+                )
+            else:
+                assert len(node.entries) <= M
+            if node.is_leaf:
+                n_leaves += 1
+                leaf_levels.add(node.level)
+            n_entries += len(node.entries)
+
+            if not node.is_leaf:
+                # children MBRs deben caber dentro del MBR del padre (que es la unión)
+                parent_union = node.get_mbr()
+                child_areas = []
+                for e in node.entries:
+                    child = self._read_node(e["child_pid"])
+                    child_mbr = child.get_mbr()
+                    assert child_mbr is None or (
+                        child_mbr.min_lon >= e["mbr"].min_lon - 1e-9
+                        and child_mbr.max_lon <= e["mbr"].max_lon + 1e-9
+                        and child_mbr.min_lat >= e["mbr"].min_lat - 1e-9
+                        and child_mbr.max_lat <= e["mbr"].max_lat + 1e-9
+                    ), f"child {e['child_pid']} MBR escapes parent entry MBR"
+                    child_areas.append(e["mbr"].area())
+                    visit(e["child_pid"], pid, node.level - 1)
+                # overlap aproximado entre pares
+                for i in range(len(node.entries)):
+                    for j in range(i + 1, len(node.entries)):
+                        a, b = node.entries[i]["mbr"], node.entries[j]["mbr"]
+                        if a.intersects_mbr(b):
+                            ov_lon = min(a.max_lon, b.max_lon) - max(a.min_lon, b.min_lon)
+                            ov_lat = min(a.max_lat, b.max_lat) - max(a.min_lat, b.min_lat)
+                            total_overlap += max(ov_lon, 0) * max(ov_lat, 0)
+                if parent_union is not None:
+                    total_dead += max(0.0, parent_union.area() - sum(child_areas))
+
+        visit(root_pid, 0)
+        assert len(leaf_levels) <= 1, f"leaves at multiple levels: {leaf_levels}"
+        return {
+            "depth": (max(leaf_levels) if leaf_levels else 0),
+            "n_nodes": n_nodes,
+            "n_leaves": n_leaves,
+            "n_entries": n_entries,
+            "total_overlap_area": total_overlap,
+            "total_dead_area": total_dead,
+        }
+
     def update_tid(self, lon: float, lat: float, old_tid: TID, new_tid: TID) -> bool:
         result = self._find_leaf(self._root_pid(), lon, lat, old_tid)
         leaf, idx = result
