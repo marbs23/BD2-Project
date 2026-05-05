@@ -44,6 +44,10 @@ class WriteAheadLog:
     def close(self) -> None:
         self._fp.close()
 
+    def flush(self) -> None:
+        """Vuelca buffers del proceso para que lecturas externas (p.ej. UNDO vía ``iter_records``) vean datos."""
+        self._fp.flush()
+
     def _compute_next_lsn(self) -> int:
         try:
             sz = os.path.getsize(self.path)
