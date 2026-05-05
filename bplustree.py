@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Tuple, List, Optional
 import struct
+import time
+import csv
 import os
 
 RECORD_FORMAT = "i100s40sifi"
@@ -49,6 +51,31 @@ class BPlusTree:
             self._write_header(-1, 0, 0, 0)
         else:
             self.file = open(self.filename, "r+b")
+
+    @classmethod
+    def from_csv(cls, filename: str, csv_path: str, limite: int = 2_000_000):
+        # si el archivo ya existe, lo borramos para empezar limpio
+        if os.path.exists(filename):
+            os.remove(filename)
+        obj = cls(filename)
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for i, row in enumerate(reader):
+                if i >= limite:
+                    break
+                try:
+                    rec = Record(
+                        id     = int(row["book_key"]),
+                        title  = row["title"],
+                        author = row["author"],
+                        pages  = int(row["pages"])           if row["pages"]           else 0,
+                        rating = float(row["average_rating"]) if row["average_rating"]  else 0.0,
+                        year   = int(row["published_date"])  if row["published_date"]   else 0,
+                    )
+                    obj.add(rec)
+                except (ValueError, KeyError):
+                    continue
+        return obj
 
     def _read_header(self) -> Tuple[int, int, int, int]:
         self.file.seek(0)
@@ -400,3 +427,57 @@ class BPlusTree:
     def reset_stats(self):
         self.read_count  = 0
         self.write_count = 0
+
+
+def ejecutar_y_medir(nombre_op: str, operacion, db_instance: BPlusTree):
+    db_instance.reset_stats()
+    start = time.time()
+    resultado = operacion()
+    end   = time.time()
+    tiempo_ms = (end - start) * 1000
+    stats = db_instance.get_stats()
+    print(f"\n--- reporte de {nombre_op} ---")
+    print(f"tiempo: {tiempo_ms:.4f} ms")
+    print(f"accesos a disco (páginas read+write): {stats['total_io']}")
+    return resultado
+
+def main():
+    nombre_bin = "books_bptree.bin"
+    nombre_csv = "books.csv"
+
+    # 1. carga inicial desde csv
+    print("--- 1. probando carga inicial desde books.csv ---")
+    db = BPlusTree.from_csv(nombre_bin, nombre_csv, limite=50)
+    print(f"carga completa. stats de creación: {db.get_stats()}")
+
+    # 2. búsqueda puntual
+    res = ejecutar_y_medir("búsqueda id 6", lambda: db.search(6), db)
+    if res:
+        print(f"libro encontrado: {res.title} | autor: {res.author} | rating: {res.rating}")
+    else:
+        print("libro no encontrado")
+
+    # 3. inserción
+    nuevo = Record(id=500, title="enhypen yey", author="mafer", pages=7, rating=5.0, year=2020)
+    ejecutar_y_medir("inserción libro id 500", lambda: db.add(nuevo), db)
+
+    # 4. búsqueda por rango
+    print("\n--- buscando libros en rango id [1 - 5] ---")
+    resultados = ejecutar_y_medir("rango 1-5", lambda: db.range_search(1, 5), db)
+    for libro in resultados:
+        print(f"  > [id {libro.id}] {libro.title}")
+
+    # 5. eliminación lógica
+    ejecutar_y_medir("eliminación id 500", lambda: db.remove(500), db)
+    res_deleted = db.search(500)
+    print(f"¿existe id 500 después de borrar?: {'sí' if res_deleted else 'no (borrado lógico)'}")
+
+    stats_final = db.get_stats()
+    print(f"\nestadísticas acumuladas finales: {stats_final}")
+
+    db.close()
+    print("\npruebas finalizadas con éxito")
+
+
+if __name__ == "__main__":
+    main()
