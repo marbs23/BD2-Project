@@ -223,3 +223,47 @@ class BPlusTree:
             page_id = next_leaf
 
         return resultados
+
+    # REMOVE
+    def remove(self, id_key: int) -> bool:
+        root_page, total_pages, height, total_records = self._read_header()
+        if root_page == -1:
+            return False
+
+        page_id = root_page
+        while not self._is_leaf_page(page_id):
+            _, num_keys, keys, children = self._read_internal_node(page_id)
+            page_id = children[0]
+            for i in range(num_keys):
+                if id_key >= keys[i]:
+                    page_id = children[i + 1]
+                else:
+                    break
+
+        num_keys, next_leaf, keys, records = self._read_leaf(page_id)
+        for i in range(num_keys):
+            if keys[i] == id_key:
+                if records[i].id == -1:
+                    return False
+                records[i].id = -1
+                self._write_leaf(page_id, num_keys, next_leaf, keys, records)
+                root_page, total_pages, height, total_records = self._read_header()
+                self._write_header(root_page, total_pages, height, total_records - 1)
+                return True
+        return False
+    
+    def close(self):
+        self.file.flush()
+        self.file.close()
+
+    def get_stats(self, last_op_time: float = 0):
+        return {
+            "tiempo de ejecución (ms)": last_op_time,
+            "reads":    self.read_count,
+            "writes":   self.write_count,
+            "total_io": self.read_count + self.write_count,
+        }
+
+    def reset_stats(self):
+        self.read_count  = 0
+        self.write_count = 0
