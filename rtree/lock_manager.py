@@ -109,6 +109,11 @@ class LockManager:
         st = self._locks.get(pid)
         if not st or not st["holders"]:
             return True
+        # Reentrancia 2PL: la misma transacción ya tiene lock ≥ pedido en esta página.
+        if tid in st["holders"]:
+            if mode == "S":
+                return True
+            return st["holders"] <= {tid}
         if mode == "S":
             return st["mode"] == "S"
         # X
@@ -120,6 +125,15 @@ class LockManager:
         tid = self._tid(tx)
         st = self._ensure_lock_entry(pid)
         self._remove_waiter(tid, pid)
+        if tid in st["holders"]:
+            if mode == "S":
+                return
+            if mode == "X" and st["mode"] == "X" and st["holders"] == {tid}:
+                return
+            if mode == "X" and st["mode"] == "S" and st["holders"] <= {tid}:
+                st["mode"] = "X"
+                st["holders"] = {tid}
+                return
         if mode == "S":
             if not st["holders"]:
                 st["mode"] = "S"

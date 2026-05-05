@@ -1,4 +1,5 @@
 import struct
+import threading
 from dataclasses import dataclass
 from heapq import heappush, heappop
 from itertools import count
@@ -112,6 +113,7 @@ class RTree:
         self._lock_mgr = lock_mgr if lock_mgr is not None else LockManager()
         self._strict_2pl = strict_2pl
         self._tid_gen = count(1)
+        self._tid_mu = threading.Lock()
         sb = store.get_superblock()
         if sb["root_pid"] == 0:
             root_pid = store.allocate_page()
@@ -130,7 +132,9 @@ class RTree:
             raise RuntimeError(
                 "Se requiere PageStore(..., wal=WriteAheadLog(...)) para begin_transaction()"
             )
-        return Transaction(next(self._tid_gen), self.store, self._lock_mgr, wal)
+        with self._tid_mu:
+            tid = next(self._tid_gen)
+        return Transaction(tid, self.store, self._lock_mgr, wal)
 
     def _root_pid(self) -> int:
         return self.store.get_root()

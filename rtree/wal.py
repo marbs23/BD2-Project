@@ -8,12 +8,16 @@ inversas del R-tree; fuera de scope para este simulador.
 Recovery implementa ARIES simplificado (D4): análisis → REDO (tx commiteadas) →
 UNDO (tx incompletas). ``replay`` ignora bytes residuales menores que un record
 (registro truncado por crash).
+
+Los appends concurrentes al mismo archivo se serializan con ``_append_mu`` para
+mantener LSN y bytes contiguos coherentes entre hilos.
 """
 
 from __future__ import annotations
 
 import os
 import struct
+import threading
 from typing import TYPE_CHECKING, Iterable
 
 if TYPE_CHECKING:
@@ -40,13 +44,15 @@ class WriteAheadLog:
         self.path = path
         self._fp = open(path, "a+b")
         self._next_lsn = self._compute_next_lsn()
+        self._append_mu = threading.Lock()
 
     def close(self) -> None:
         self._fp.close()
 
     def flush(self) -> None:
         """Vuelca buffers del proceso para que lecturas externas (p.ej. UNDO vía ``iter_records``) vean datos."""
-        self._fp.flush()
+        with self._append_mu:
+            self._fp.flush()
 
     def _compute_next_lsn(self) -> int:
         try:
@@ -71,7 +77,7 @@ class WriteAheadLog:
             return None
         return raw
 
-    def _append_record(
+    def _append_locked_body(
         self,
         tid: int,
         pid: int,
@@ -89,9 +95,16 @@ class WriteAheadLog:
         self._fp.write(after)
         return lsn
 
-    def _fsync(self) -> None:
-        self._fp.flush()
-        os.fsync(self._fp.fileno())
+    def _append_record(
+        self,
+        tid: int,
+        pid: int,
+        op: int,
+        before: bytes,
+        after: bytes,
+    ) -> int:
+        with self._append_mu:
+            return self._append_locked_body(tid, pid, op, before, after)
 
     def log_begin(self, tid: int) -> None:
         z = bytes(PAGE_BYTES)
@@ -102,13 +115,17 @@ class WriteAheadLog:
 
     def log_commit(self, tid: int) -> None:
         z = bytes(PAGE_BYTES)
-        self._append_record(tid, 0, OP_COMMIT, z, z)
-        self._fsync()
+        with self._append_mu:
+            self._append_locked_body(tid, 0, OP_COMMIT, z, z)
+            self._fp.flush()
+            os.fsync(self._fp.fileno())
 
     def log_abort(self, tid: int) -> None:
         z = bytes(PAGE_BYTES)
-        self._append_record(tid, 0, OP_ABORT, z, z)
-        self._fsync()
+        with self._append_mu:
+            self._append_locked_body(tid, 0, OP_ABORT, z, z)
+            self._fp.flush()
+            os.fsync(self._fp.fileno())
 
     @staticmethod
     def replay(store: "PageStore", wal_path: str) -> None:
