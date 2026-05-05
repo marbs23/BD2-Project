@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, List
 import struct
 import os
 
@@ -71,7 +71,7 @@ class BPlusTree:
         data = self.file.read(PAGE_SIZE)
         self.read_count += 1
 
-        # INCOMPLETE PAGE FILL WITH 0's
+        # Incomplete page fill with 0's
         if len(data) < PAGE_SIZE:
             data = data.ljust(PAGE_SIZE, b"\x00")
         return data
@@ -82,3 +82,55 @@ class BPlusTree:
         self.file.write(data)
         self.file.flush()
         self.write_count += 1
+
+    def _read_internal_node(self, page_id: int) -> Tuple[int, int, List[int], List[int]]:
+        raw = self._read_page_raw(page_id)
+        unpacked = struct.unpack_from(INTERNAL_NODE_FORMAT, raw)
+        is_leaf  = unpacked[0]
+        num_keys = unpacked[1]
+        keys     = list(unpacked[2 : 2 + ORDER])[:num_keys]
+        children = list(unpacked[2 + ORDER : 2 + ORDER + ORDER + 1])[:num_keys + 1]
+        return is_leaf, num_keys, keys, children
+    
+    def _write_internal_node(self, page_id: int, num_keys: int, keys: List[int], children: List[int]):
+        keys_padded     = (keys     + [0] * ORDER)[:ORDER]
+        children_padded = (children + [0] * (ORDER + 1))[:ORDER + 1]
+        data = struct.pack(INTERNAL_NODE_FORMAT, 0, num_keys, *keys_padded, *children_padded)
+        self._write_page_raw(page_id, data)
+
+    def _read_leaf(self, page_id: int) -> Tuple[int, int, List[int], List[Record]]:
+        raw = self._read_page_raw(page_id)
+        is_leaf, num_keys, next_leaf = struct.unpack_from("iii", raw, 0)
+        offset = 12
+
+        keys = []
+        for i in range(ORDER_LEAF):
+            k = struct.unpack_from("i", raw, offset)[0]
+            offset += 4
+            keys.append(k)
+        keys = keys[:num_keys]
+
+        records = []
+        for i in range(ORDER_LEAF):
+            rec_bytes = raw[offset: offset + RECORD_SIZE]
+            offset += RECORD_SIZE
+            if i < num_keys:
+                records.append(self._unpack_record(rec_bytes))
+
+        return num_keys, next_leaf, keys, records
+    
+    def _write_leaf(self, page_id: int, num_keys: int, next_leaf: int,
+                    keys: List[int], records: List[Record]):
+        data = struct.pack("iii", 1, num_keys, next_leaf)
+
+        keys_padded = (keys + [0] * ORDER_LEAF)[:ORDER_LEAF]
+        for k in keys_padded:
+            data += struct.pack("i", k)
+
+        for i in range(ORDER_LEAF):
+            if i < len(records):
+                data += self._pack_record(records[i])
+            else:
+                data += b"\x00" * RECORD_SIZE
+
+        self._write_page_raw(page_id, data)
