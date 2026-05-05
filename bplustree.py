@@ -158,8 +158,7 @@ class BPlusTree:
             rating    = values[4],
             year      = values[5],
         )
-    #
-    
+
     # NEW PAGE ON DISK
     def _alloc_page(self) -> int:
         root_page, total_pages, height, total_records = self._read_header()
@@ -196,3 +195,31 @@ class BPlusTree:
                     return None
                 return records[i]
         return None
+
+    # RANGE SEARCH
+    def range_search(self, begin: int, end: int) -> List[Record]:
+        root_page, total_pages, height, total_records = self._read_header()
+        if root_page == -1:
+            return []
+
+        page_id = root_page
+        while not self._is_leaf_page(page_id):
+            _, num_keys, keys, children = self._read_internal_node(page_id)
+            page_id = children[0]
+            for i in range(num_keys):
+                if begin >= keys[i]:
+                    page_id = children[i + 1]
+                else:
+                    break
+
+        resultados = []
+        while page_id != -1:
+            num_keys, next_leaf, keys, records = self._read_leaf(page_id)
+            for i in range(num_keys):
+                if keys[i] > end:
+                    return resultados
+                if keys[i] >= begin and records[i].id != -1:
+                    resultados.append(records[i])
+            page_id = next_leaf
+
+        return resultados
