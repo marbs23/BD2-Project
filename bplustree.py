@@ -223,6 +223,139 @@ class BPlusTree:
             page_id = next_leaf
 
         return resultados
+    
+    # ADD
+    def add(self, record: Record):
+        root_page, total_pages, height, total_records = self._read_header()
+
+        # Case of empty tree
+        if root_page == -1:
+            new_page = self._alloc_page()
+            self._write_leaf(new_page, 1, -1, [record.id], [record])
+            root_page, total_pages, height, total_records = self._read_header()
+            self._write_header(new_page, total_pages, 1, 1)
+            return
+
+        # inserción recursiva desde la raíz
+        promoted_key, new_page = self._insert_recursive(root_page, record)
+
+        # si la raíz se dividió, creamos una nueva raíz
+        if promoted_key != -1:
+            root_page, total_pages, height, total_records = self._read_header()
+            new_root = self._alloc_page()
+            # la nueva raíz tiene una sola clave y dos hijos
+            self._write_internal_node(new_root, 1, [promoted_key], [root_page, new_page])
+            root_page, total_pages, height, total_records = self._read_header()
+            self._write_header(new_root, total_pages, height + 1, total_records + 1)
+        else:
+            root_page, total_pages, height, total_records = self._read_header()
+            self._write_header(root_page, total_pages, height, total_records + 1)
+
+    def _insert_recursive(self, page_id: int, record: Record) -> Tuple[int, int]:
+        """
+        Inserta recursivamente. Devuelve (promoted_key, new_page_id) si hubo split,
+        o (-1, -1) si no hubo split.
+        """
+        if self._is_leaf_page(page_id):
+            return self._insert_into_leaf(page_id, record)
+        else:
+            return self._insert_into_internal(page_id, record)
+
+    def _insert_into_leaf(self, page_id: int, record: Record) -> Tuple[int, int]:
+        num_keys, next_leaf, keys, records = self._read_leaf(page_id)
+
+        # encontramos la posición de inserción (mantenemos orden por id)
+        pos = 0
+        while pos < num_keys and keys[pos] < record.id:
+            pos += 1
+
+        # si la clave ya existe, actualizamos (upsert)
+        if pos < num_keys and keys[pos] == record.id:
+            records[pos] = record
+            self._write_leaf(page_id, num_keys, next_leaf, keys, records)
+            return -1, -1
+
+        # insertamos en la posición correcta
+        keys.insert(pos, record.id)
+        records.insert(pos, record)
+        num_keys += 1
+
+        # si no hay overflow, simplemente escribimos y listo
+        if num_keys <= ORDER_LEAF:
+            self._write_leaf(page_id, num_keys, next_leaf, keys, records)
+            return -1, -1
+
+        # SPLIT DE HOJA: dividimos a la mitad
+        mid = num_keys // 2
+        # la clave que sube al padre es la primera clave de la hoja derecha
+        promoted_key = keys[mid]
+
+        # hoja izquierda: se queda con [0, mid)
+        left_keys    = keys[:mid]
+        left_records = records[:mid]
+
+        # hoja derecha: se queda con [mid, num_keys)
+        right_keys    = keys[mid:]
+        right_records = records[mid:]
+
+        # creamos la página de la hoja derecha
+        new_page = self._alloc_page()
+
+        # actualizamos el enlace next_leaf:
+        # la hoja izquierda apunta a la nueva hoja derecha
+        # la hoja derecha hereda el next_leaf original de la izquierda
+        self._write_leaf(page_id, len(left_keys),  new_page,   left_keys,  left_records)
+        self._write_leaf(new_page, len(right_keys), next_leaf,  right_keys, right_records)
+
+        return promoted_key, new_page
+
+    def _insert_into_internal(self, page_id: int, record: Record) -> Tuple[int, int]:
+        _, num_keys, keys, children = self._read_internal_node(page_id)
+
+        # encontramos el hijo correcto por donde bajar
+        child_idx = num_keys  # por defecto el último hijo
+        for i in range(num_keys):
+            if record.id < keys[i]:
+                child_idx = i
+                break
+
+        # bajamos recursivamente
+        promoted_key, new_child = self._insert_recursive(children[child_idx], record)
+
+        # si no hubo split abajo, no hay nada que hacer aquí
+        if promoted_key == -1:
+            return -1, -1
+
+        # hubo split abajo: insertamos la clave promovida en este nodo interno
+        keys.insert(child_idx, promoted_key)
+        children.insert(child_idx + 1, new_child)
+        num_keys += 1
+
+        # si no hay overflow en este nodo interno, escribimos y listo
+        if num_keys <= ORDER:
+            self._write_internal_node(page_id, num_keys, keys, children)
+            return -1, -1
+
+        # SPLIT DE NODO INTERNO: dividimos a la mitad
+        mid = num_keys // 2
+        # la clave del medio SUBE (no se copia, se mueve)
+        promoted_key = keys[mid]
+
+        # nodo izquierdo: claves [0, mid) y hijos [0, mid+1)
+        left_keys     = keys[:mid]
+        left_children = children[:mid + 1]
+
+        # nodo derecho: claves [mid+1, num_keys) y hijos [mid+1, num_keys+1)
+        right_keys     = keys[mid + 1:]
+        right_children = children[mid + 1:]
+
+        # creamos la página del nodo derecho
+        new_page = self._alloc_page()
+        self._write_internal_node(page_id, len(left_keys),  left_keys,  left_children)
+        self._write_internal_node(new_page, len(right_keys), right_keys, right_children)
+
+        return promoted_key, new_page
+
 
     # REMOVE
     def remove(self, id_key: int) -> bool:
