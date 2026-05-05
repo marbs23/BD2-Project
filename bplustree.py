@@ -134,3 +134,43 @@ class BPlusTree:
                 data += b"\x00" * RECORD_SIZE
 
         self._write_page_raw(page_id, data)
+
+    @staticmethod
+    def _pack_record(rec: Record) -> bytes:
+        return struct.pack(
+            RECORD_FORMAT,
+            rec.id,
+            rec.title.encode("utf-8")[:100].ljust(100, b"\x00"),
+            rec.author.encode("utf-8")[:40].ljust(40, b"\x00"),
+            rec.pages,
+            rec.rating,
+            rec.year,
+        )
+    
+    @staticmethod
+    def _unpack_record(data: bytes) -> Record:
+        values = struct.unpack(RECORD_FORMAT, data)
+        return Record(
+            id        = values[0],
+            title     = values[1].decode("utf-8", errors="ignore").rstrip("\x00").strip(),
+            author    = values[2].decode("utf-8", errors="ignore").rstrip("\x00").strip(),
+            pages     = values[3],
+            rating    = values[4],
+            year      = values[5],
+        )
+    
+    def close(self):
+        self.file.flush()
+        self.file.close()
+
+    def get_stats(self, last_op_time: float = 0):
+        return {
+            "tiempo de ejecución (ms)": last_op_time,
+            "reads":    self.read_count,
+            "writes":   self.write_count,
+            "total_io": self.read_count + self.write_count,
+        }
+
+    def reset_stats(self):
+        self.read_count  = 0
+        self.write_count = 0
