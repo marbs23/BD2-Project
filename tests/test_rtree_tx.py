@@ -8,6 +8,24 @@ from rtree.rtree import RTree
 from rtree.wal import WriteAheadLog
 
 
+class TestLegacyAutocommitUnchanged(unittest.TestCase):
+    """Sin WAL ni tx: mismo comportamiento que antes del Bloque 4 (API por defecto)."""
+
+    def test_insert_and_range_search_without_tx_or_wal(self) -> None:
+        td = tempfile.TemporaryDirectory()
+        try:
+            db = os.path.join(td.name, "legacy.db")
+            stats = IOStats()
+            store = PageStore(db, stats)
+            tree = RTree(store)
+            tree.insert(12.34, 56.78, TID(100, 5))
+            sr = tree.range_search(12.34, 56.78, 0.0001)
+            self.assertEqual(len(sr.tids), 1)
+            self.assertEqual(sr.tids[0], TID(100, 5))
+        finally:
+            td.cleanup()
+
+
 class TestRTreeTransactionalInsert(unittest.TestCase):
     def test_insert_commit_with_wal_and_validate(self) -> None:
         td = tempfile.TemporaryDirectory()

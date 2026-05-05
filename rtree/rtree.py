@@ -153,6 +153,19 @@ class RTree:
         )
         return node.entries[best_idx]["child_pid"]
 
+    def _leaf_pid_for_point_readonly(self, lon: float, lat: float) -> int:
+        """
+        Desciende desde la raíz sin candados (solo lectura) con la misma heurística
+        que el crabbing. Sirve para comprobar, tras un descenso optimista, que el
+        árbol no cambió bajo nuestros pies (otra transacción pudo partir un ancestro).
+        """
+        pid = self._root_pid()
+        while True:
+            node = self._read_node(pid)
+            if node.is_leaf:
+                return pid
+            pid = self._child_pid_for_point(node, lon, lat)
+
     def _descend_optimistic(
         self,
         lon: float,
@@ -162,8 +175,13 @@ class RTree:
     ) -> tuple[list[int], int, bool]:
         """
         Cangrejo S hasta la hoja; en hoja upgrade a X si ``leaf_lock == 'X'``.
-        Retorna (pids aún tomados en orden, leaf_pid, need_retry).
-        TODO: marcar need_retry=True si el padre debe cambiar MBR antes de escribir (no implementado).
+
+        Tras fijar la hoja, compara con un descenso read-only: si difiere, otro hilo
+        pudo reestructurar mientras se soltaban S en padres → ``need_retry=True``;
+        el caller debe ``release_all`` y tomar el camino pesimista (D2).
+
+        TODO opcional: detectar cambio de MBR del padre sin split (estructura igual,
+        distinta geometría de entrada) — mismo gancho ``need_retry``.
         """
         pid = self._root_pid()
         held: list[int] = []
@@ -174,7 +192,9 @@ class RTree:
             if node.is_leaf:
                 if leaf_lock == "X":
                     self._lock_mgr.acquire(tx, pid, "X")
-                return held, pid, False
+                stable = self._leaf_pid_for_point_readonly(lon, lat)
+                need_retry = stable != pid
+                return held, pid, need_retry
             child_pid = self._child_pid_for_point(node, lon, lat)
             self._lock_mgr.acquire(tx, child_pid, "S")
             self._lock_mgr.release(tx, pid)
@@ -347,8 +367,7 @@ class RTree:
             self._insert_autocommit(lon, lat, tid)
             return
 
-        # Descenso optimista (cangrejo S+X hoja) para medición / futuro need_retry;
-        # la escritura usa cadena pesimista X en todo el camino (D2 + ``_adjust_tree``).
+        # Descenso optimista (need_retry interno si la hoja read-only ≠ hoja bloqueada).
         self._descend_optimistic(lon, lat, "X", tx)
         self._lock_mgr.release_all(tx.tid)
 
@@ -554,6 +573,10 @@ class RTree:
             self.store.set_root(new_root_pid, tx=tx)
             self.store.pin_page(new_root_pid)
 
+        # TODO (durabilidad / opcional +2 pts): si ``tx`` está activo, estas ``insert``
+        # deben ejecutarse con el mismo ``tx`` para que huérfanos pasen por WAL y locks;
+        # hoy son autocommit y un crash entre ``free_page`` y reinsert deja entradas
+        # inconsistentes respecto al log.
         for entry in orphans:
             if "tid_page" in entry:
                 self.insert(entry["mbr"].min_lon, entry["mbr"].min_lat,
