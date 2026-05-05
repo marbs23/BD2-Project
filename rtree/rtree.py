@@ -116,14 +116,9 @@ class RTree:
     def _choose_subtree(self, node: RTreeNode, mbr: MBR) -> RTreeNode:
         if node.is_leaf:
             return node
-        if node.level == 1:
-            best_idx = min(range(len(node.entries)),
-                           key=lambda i: (node.entries[i]["mbr"].area_enlargement(mbr),
-                                          node.entries[i]["mbr"].area()))
-        else:
-            best_idx = min(range(len(node.entries)),
-                           key=lambda i: (node.entries[i]["mbr"].area_enlargement(mbr),
-                                          node.entries[i]["mbr"].area()))
+        best_idx = min(range(len(node.entries)),
+                       key=lambda i: (node.entries[i]["mbr"].area_enlargement(mbr),
+                                      node.entries[i]["mbr"].area()))
         child = self._read_node(node.entries[best_idx]["child_pid"])
         return self._choose_subtree(child, mbr)
 
@@ -401,6 +396,27 @@ class RTree:
             for e in node.entries:
                 self._reinsert_subtree(e["child_pid"])
         self.store.free_page(pid)
+
+    def bulk_load_from_csv(self, path: str, lon_col: str, lat_col: str,
+                            data_page_id: int = 1, delimiter: str = ",",
+                            skip_invalid: bool = True) -> int:
+        import csv
+        n = 0
+        with open(path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f, delimiter=delimiter)
+            if lon_col not in reader.fieldnames or lat_col not in reader.fieldnames:
+                raise ValueError(f"CSV missing columns: {lon_col}, {lat_col}")
+            for slot, row in enumerate(reader):
+                try:
+                    lon = float(row[lon_col])
+                    lat = float(row[lat_col])
+                except (TypeError, ValueError):
+                    if skip_invalid:
+                        continue
+                    raise
+                self.insert(lon, lat, TID(data_page_id, slot))
+                n += 1
+        return n
 
     def update_tid(self, lon: float, lat: float, old_tid: TID, new_tid: TID) -> bool:
         result = self._find_leaf(self._root_pid(), lon, lat, old_tid)
