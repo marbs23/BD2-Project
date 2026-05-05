@@ -25,7 +25,7 @@ def _pack(r: Record) -> bytes:
     return struct.pack(
         RECORD_FORMAT,
         r.id,
-        r.title .encode("utf-8")[:100].ljust(100, b"\x00"),
+        r.title.encode("utf-8")[:100].ljust(100, b"\x00"),
         r.author.encode("utf-8")[:40 ].ljust(40,  b"\x00"),
         r.pages, r.rating, r.year,
     )
@@ -34,14 +34,15 @@ def _unpack(data: bytes) -> Record:
     rid, title, author, pages, rating, year = struct.unpack(RECORD_FORMAT, data)
     return Record(
         id=rid,
-        title =title .decode("utf-8").rstrip("\x00"),
+        title =title.decode("utf-8").rstrip("\x00"),
         author=author.decode("utf-8").rstrip("\x00"),
         pages=pages, rating=round(rating, 2), year=year,
     )
 
+#Funcion de direccionamiento indexado
 def _bits(key: int, depth: int) -> int:
-    """Return the lowest `depth` bits of key (extendible hashing index)."""
-    return key & ((1 << depth) - 1)
+    # profundidad total de bits a considerar para el hashing (global_depth o local_depth)
+    return key % (2** depth)
 
 
 class ExtendibleHashFile:
