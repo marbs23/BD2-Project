@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 import struct
 import os
 
@@ -158,19 +158,41 @@ class BPlusTree:
             rating    = values[4],
             year      = values[5],
         )
+    #
     
-    def close(self):
-        self.file.flush()
-        self.file.close()
+    # NEW PAGE ON DISK
+    def _alloc_page(self) -> int:
+        root_page, total_pages, height, total_records = self._read_header()
+        new_page_id = total_pages
+        self._write_header(root_page, total_pages + 1, height, total_records)
+        return new_page_id
 
-    def get_stats(self, last_op_time: float = 0):
-        return {
-            "tiempo de ejecución (ms)": last_op_time,
-            "reads":    self.read_count,
-            "writes":   self.write_count,
-            "total_io": self.read_count + self.write_count,
-        }
+    def _is_leaf_page(self, page_id: int) -> bool:
+        raw = self._read_page_raw(page_id)
+        is_leaf = struct.unpack_from("i", raw, 0)[0]
+        return is_leaf == 1
 
-    def reset_stats(self):
-        self.read_count  = 0
-        self.write_count = 0
+    # SEARCH
+    def search(self, id_key: int) -> Optional[Record]:
+        root_page, total_pages, height, total_records = self._read_header()
+        if root_page == -1:
+            return None  # Empty tree
+
+        page_id = root_page
+        while not self._is_leaf_page(page_id):
+            _, num_keys, keys, children = self._read_internal_node(page_id)
+
+            page_id = children[0]
+            for i in range(num_keys):
+                if id_key >= keys[i]:
+                    page_id = children[i + 1]
+                else:
+                    break
+
+        num_keys, next_leaf, keys, records = self._read_leaf(page_id)
+        for i in range(num_keys):
+            if keys[i] == id_key:
+                if records[i].id == -1:  # mark as deleted
+                    return None
+                return records[i]
+        return None
