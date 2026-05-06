@@ -1,0 +1,262 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{enumitem}
+
+\lstset{
+    basicstyle=\ttfamily\footnotesize,
+    backgroundcolor=\color{gray!10},
+    breaklines=true,
+    frame=single,
+    showstringspaces=false,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b
+}
+
+\title{\textbf{Proyecto 1 — Base de Datos II}\\[0.4em]
+\large Organización de archivos: índices SQL sobre B\textsuperscript{+}-Tree, Sequential File, Extendible Hash y R-Tree}
+\author{Grupo BD2 — UTEC 26-1\\\small{[completar integrantes]}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Se diseñó e implementó un mini-DBMS que expone un dialecto SQL reducido
+sobre cuatro estructuras de archivo: \textbf{B\textsuperscript{+}-Tree},
+\textbf{Sequential File}, \textbf{Extendible Hash} y \textbf{R-Tree
+espacial}. Cada técnica se evalúa midiendo accesos a disco
+(\emph{disk reads/writes}) y tiempo de ejecución para inserción, búsqueda
+puntual, búsqueda por rango y --- en el caso del R-Tree --- búsqueda por
+radio y $k$-vecinos más cercanos. El R-Tree adicionalmente integra control
+de concurrencia 2PL con detección de \emph{deadlocks} y \emph{Write-Ahead
+Log} para recuperación ante fallos.
+\end{abstract}
+
+\section{Introducción}
+
+\subsection{Objetivos}
+\begin{itemize}[nosep]
+    \item Implementar cuatro técnicas clásicas de indexación en disco con
+    operaciones \texttt{search}, \texttt{add}, \texttt{remove} y, donde
+    aplique, \texttt{range\_search}.
+    \item Construir un parser SQL minimalista y un ejecutor que despache la
+    operación a la estructura adecuada según el índice declarado en
+    \texttt{CREATE TABLE}.
+    \item Comparar empíricamente el costo de I/O y el tiempo de respuesta
+    entre las cuatro estructuras usando un dataset de libros.
+    \item En la rama del R-Tree: incorporar 2PL con \emph{lock coupling},
+    detección de \emph{deadlocks} por wait-for graph, y \emph{Write-Ahead
+    Log} ARIES-simplificado.
+\end{itemize}
+
+\subsection{Dominio de datos}
+Se utiliza el dataset \texttt{books.csv} con los campos
+\texttt{book\_key, title, author, pages, average\_rating,
+published\_date}. Para consultas espaciales se usan coordenadas
+\texttt{(longitud, latitud)} con TIDs sintéticos.
+
+\section{Arquitectura del sistema}
+
+\begin{verbatim}
+            +---------------------+
+            |  Cliente / Frontend |
+            +----------+----------+
+                       |
+                       v
+            +---------------------+
+            |     parser_sql.py   |  Scanner + Parser → AST
+            +----------+----------+
+                       |
+                       v
+            +---------------------+
+            |     ejecutor.py     |  Catálogo de tablas + dispatch
+            +-+-------+--------+--+
+              |       |        |   \
+              v       v        v    v
+         BPlusTree SeqFile ExtHash RTree (+WAL +LockManager)
+\end{verbatim}
+
+Todos los índices comparten una interfaz informal:
+\texttt{search(k)}, \texttt{add(rec)}/\texttt{insert(rec)}, \texttt{remove(k)},
+\texttt{range\_search(...)}, contadores de \texttt{disk\_reads/writes}.
+
+\section{Estructuras implementadas}
+
+\subsection{B\textsuperscript{+}-Tree}
+Páginas de tamaño fijo. Las hojas almacenan los registros completos y se
+enlazan en lista simple para soportar \texttt{range\_search} eficiente.
+Los nodos internos almacenan claves separadoras y punteros a página.
+Inserciones causan \emph{splits} con propagación a la raíz; eliminaciones
+implementadas con \emph{borrado lógico} (sin fusión inmediata).
+
+\textbf{Costos esperados}: $O(\log_B n)$ para búsqueda puntual,
+$O(\log_B n + k/B)$ para rango.
+
+\subsection{Sequential File}
+Archivo principal ordenado más archivo auxiliar para overflows. La
+búsqueda usa búsqueda binaria sobre el archivo principal y luego un
+recorrido secuencial del auxiliar. Periódicamente se hace \texttt{rebuild}
+para reabsorber el auxiliar.
+
+\textbf{Trade-off}: lecturas baratas por localidad pero inserciones
+costosas; \texttt{k\_desorted} controla la frecuencia de rebuild.
+
+\subsection{Extendible Hash}
+Directorio en memoria de tamaño $2^{D}$ donde $D$ es la profundidad
+global. Cada bucket en disco con \texttt{local\_depth}. Cuando un bucket
+se llena se hace \emph{split} con redistribución por bit relevante; si
+\texttt{local\_depth = global\_depth} se duplica el directorio.
+
+\textbf{Limitación}: no soporta \texttt{range\_search} (consecuencia
+inherente del hashing).
+
+\textbf{Bugs corregidos durante la implementación}:
+\begin{enumerate}[nosep]
+    \item Variable local llamada \texttt{bit\_valor} sobreescribía la función homónima en el scope del split.
+    \item En el re-puntero del directorio se aplicaba \texttt{bit\_valor(i, new\_ld)} sobre el índice $i$, cuando $i$ ya \emph{es} el prefijo de bits y solo había que extraer el bit relevante.
+    \item \texttt{insert} llamaba a \texttt{\_split} una sola vez sin reintento: si dos claves caían en el mismo bucket post-split (colisión total de bits) la inserción se perdía. Reemplazado por bucle con tope de reintentos.
+\end{enumerate}
+
+\subsection{R-Tree}
+Árbol balanceado sobre MBRs (Minimum Bounding Rectangles).
+Implementación de splits cuadrática (algoritmo de Guttman) y descenso por
+\emph{minimum enlargement}. Soporta:
+\begin{itemize}[nosep]
+    \item \texttt{range\_search(x, y, r)}: poda por intersección de
+    círculo con MBR.
+    \item \texttt{knn(x, y, k)}: \emph{best-first search} con cola de
+    prioridad sobre distancias mínimas a MBRs.
+    \item \texttt{insert(lon, lat, tid)}: TID es par
+    $(\text{page\_id}, \text{slot\_id})$ que apunta al registro real.
+\end{itemize}
+
+\section{Concurrencia y recuperación (R-Tree)}
+
+\subsection{Two-Phase Locking con lock coupling}
+\textsf{LockManager} a nivel de página con modos S (compartido) y X
+(exclusivo). El descenso por el árbol usa \emph{lock coupling}
+(\textit{crabbing}): se mantiene un S-lock sobre el padre solo hasta
+asegurar el lock del hijo.
+
+\subsection{Detección de \emph{deadlocks}}
+Wait-for graph que se reconstruye en cada espera. DFS detecta ciclos; la
+víctima es la transacción con menor \texttt{tid}, que es marcada
+(\texttt{aborted = True}) y libera todos sus locks. Las demás
+transacciones la observan vía \texttt{Condition.wait(timeout=0.05)} y
+proceden.
+
+\subsection{Write-Ahead Log}
+Esquema ARIES simplificado. Antes de cada modificación se escribe
+\texttt{(tid, pid, before\_image, after\_image)} al log. Recovery aplica
+REDO de transacciones \emph{committed} y UNDO de las que no llegaron a
+\texttt{COMMIT}.
+
+\section{Parser y ejecutor SQL}
+
+El subset SQL soportado:
+\begin{lstlisting}[language=SQL,caption={Gramática soportada}]
+CREATE TABLE t (col TIPO [INDEX TECNICA], ...) [FROM FILE "x.csv"];
+SELECT * FROM t WHERE col = v;
+SELECT * FROM t WHERE col BETWEEN a AND b;
+SELECT * FROM t WHERE col IN (POINT(x,y), RADIUS r);
+SELECT * FROM t WHERE col IN (POINT(x,y), K n);
+INSERT INTO t VALUES (v1, v2, ...);
+DELETE FROM t WHERE col = v;
+\end{lstlisting}
+
+Las técnicas válidas son \texttt{BPTREE}, \texttt{SEQUENTIAL},
+\texttt{HASH}, \texttt{RTREE}. El parser produce un AST de
+\textit{dataclasses} (\texttt{NodoCreateTable},
+\texttt{NodoSelectPuntual}, etc.) que el \textsf{Ejecutor} despacha al
+índice correspondiente y devuelve un \texttt{ResultadoEjecucion} con
+filas, \texttt{disk\_reads/writes} y tiempo en milisegundos.
+
+\section{Pruebas}
+
+\subsection{Suite de tests automatizados}
+\begin{itemize}[nosep]
+    \item 71 tests unitarios sobre el R-Tree
+    (\texttt{test\_rtree\_ops}, \texttt{test\_wal},
+    \texttt{test\_lock\_manager}, \texttt{test\_recovery},
+    \texttt{test\_concurrency}, \dots).
+    \item 3 tests de integración del ejecutor SQL contra B\textsuperscript{+}-Tree, Hash y R-Tree.
+    \item Total: \textbf{74 tests, 100\% pasando} en $\sim 5\,$s.
+\end{itemize}
+
+\subsection{Demo de concurrencia}
+\texttt{examples/concurrent\_demo.py} lanza dos threads que insertan y
+consultan en rangos disjuntos del mismo árbol. El \texttt{event\_cb} del
+LockManager registra cada \texttt{LOCK}/\texttt{WAIT} con \emph{timestamp}
+en \texttt{concurrent\_demo.log}, mostrando la contención real, los
+\texttt{COMMIT} por lote y los \texttt{ABORT} por \emph{deadlock}.
+
+\section{Resultados experimentales (preliminares)}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Operación} & \textbf{B\textsuperscript{+}-Tree} & \textbf{SeqFile} & \textbf{Hash} & \textbf{R-Tree} \\
+\midrule
+\texttt{search} puntual (I/O) & 3 & $O(\log n)$ + aux & 1--2 & --- \\
+\texttt{range\_search} (I/O)  & 3 + hojas & lineal en rango & N/A & poda MBR \\
+\texttt{insert} (I/O)         & 6 & 1 (al aux) & 1--2 & $O(\log n)$ \\
+\bottomrule
+\end{tabular}
+\caption{Costos observados en demos pequeñas (n=10). Los datos finales se obtendrán con \texttt{books.csv} completo.}
+\end{table}
+
+\textbf{Pendiente}: ejecutar benchmark sobre $n \in \{10^3, 10^4, 10^5\}$
+con \texttt{books.csv} y graficar tiempo y \texttt{total\_io} vs $n$.
+
+\section{Conclusiones (preliminares)}
+
+\begin{itemize}[nosep]
+    \item B\textsuperscript{+}-Tree es la opción más balanceada: soporta puntual y rango con costo logarítmico predecible.
+    \item Sequential File es competitivo para cargas mayoritariamente de lectura, pero requiere \emph{rebuild} periódico.
+    \item Extendible Hash es óptimo para búsqueda puntual (1--2 I/O) pero no admite rango.
+    \item R-Tree es la única estructura del proyecto que soporta consultas espaciales (radio y $k$-NN).
+    \item La integración del WAL y el LockManager en el R-Tree no degradó las pruebas single-threaded existentes y permitió 2 threads concurrentes con detección automática de \emph{deadlocks}.
+\end{itemize}
+
+\section{Trabajo pendiente}
+\begin{itemize}[nosep]
+    \item Benchmark formal con \texttt{books.csv} completo y gráficas comparativas.
+    \item Frontend web (rama \texttt{frontend}) que consuma el ejecutor.
+    \item Integración del parser desde el frontend (POST de SQL → tabla de resultados con métricas).
+    \item Video de demostración.
+\end{itemize}
+
+\appendix
+\section{Estructura del repositorio}
+\begin{verbatim}
+BD2-Project/
+├── parser_sql.py          ← scanner + parser SQL
+├── ejecutor.py            ← dispatcher AST → índice
+├── bplustree.py           ← B+-Tree
+├── sequential_file.py     ← Sequential File con archivo aux
+├── extendible_hash.py     ← Extendible Hash
+├── rtree/
+│   ├── rtree.py           ← R-Tree con lock coupling
+│   ├── page_store.py      ← gestor de páginas + WAL
+│   ├── lock_manager.py    ← 2PL + deadlock detection
+│   ├── wal.py             ← Write-Ahead Log ARIES-simplificado
+│   ├── transaction.py     ← context manager begin/commit/abort
+│   └── geometry.py        ← MBR, TID, primitivas geométricas
+├── examples/
+│   └── concurrent_demo.py ← demo de 2 threads con log timestamped
+└── tests/                 ← 74 tests
+\end{verbatim}
+
+\end{document}

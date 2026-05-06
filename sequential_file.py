@@ -527,7 +527,7 @@ def ejecutar_y_medir(nombre_op, operacion, db_instance):
     stats = db_instance.get_stats()
     print(f"\n--- reporte de {nombre_op} ---")
     print(f"tiempo: {tiempo_ms:.4f} ms")
-    print(f"accesos a disco (páginas read+write): {stats["total_io"]}")
+    print(f"accesos a disco (páginas read+write): {stats['total_io']}")
     return resultado
 
 def main():
@@ -569,7 +569,7 @@ def main():
 
     # verificamos que ya no existe
     res_deleted = db.search(500)
-    print(f"¿existe el id 500 después de borrar?: {"sí" if res_deleted else "no (borrado lógico)"}")
+    print(f"¿existe el id 500 después de borrar?: {'sí' if res_deleted else 'no (borrado lógico)'}")
 
     # 6. forzar rebuild (insertamos más libros para superar k_desorted=5)
     print("\n--- insertando más libros para forzar rebuild físico ---")

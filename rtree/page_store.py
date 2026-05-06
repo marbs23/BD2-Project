@@ -2,7 +2,11 @@ import os
 import struct
 import threading
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    pass
 
 
 @dataclass
@@ -29,9 +33,10 @@ class PageStore:
 
     SUPERBLOCK_PID = 0
 
-    def __init__(self, filepath: str, stats: IOStats, lock=None):
+    def __init__(self, filepath: str, stats: IOStats, lock=None, wal: Any = None):
         self.filepath = filepath
         self.stats = stats
+        self._wal = wal
         self._lock = lock or threading.Lock()
         self._buffer: OrderedDict[int, bytearray] = OrderedDict()
         self._pinned: set[int] = set()
@@ -98,8 +103,11 @@ class PageStore:
         self._buffer_insert(pid, data)
         return memoryview(self._buffer[pid])
 
-    def write_page(self, pid: int, data: bytes) -> None:
+    def write_page(self, pid: int, data: bytes, tx: Any = None) -> None:
         assert len(data) == self.PAGE_SIZE, f"Page must be {self.PAGE_SIZE} bytes, got {len(data)}"
+        if tx is not None and self._wal is not None:
+            before = bytes(self.read_page(pid))
+            self._wal.log_write(int(getattr(tx, "tid")), pid, before, data)
         self.stats.writes += 1
         self._write_to_disk(pid, data)
         self._buffer_insert(pid, bytearray(data))
@@ -115,16 +123,16 @@ class PageStore:
         return self._decode_superblock(data)
 
     def flush_superblock(self, root_pid: int, next_free: int,
-                         free_head: int, node_count: int) -> None:
+                         free_head: int, node_count: int, tx: Any = None) -> None:
         sb = self._encode_superblock(root_pid, next_free, free_head, node_count)
-        self.write_page(self.SUPERBLOCK_PID, sb)
+        self.write_page(self.SUPERBLOCK_PID, sb, tx=tx)
 
     def get_root(self) -> int:
         return self.get_superblock()["root_pid"]
 
-    def set_root(self, pid: int) -> None:
+    def set_root(self, pid: int, tx: Any = None) -> None:
         sb = self.get_superblock()
-        self.flush_superblock(pid, sb["next_free"], sb["free_head"], sb["node_count"])
+        self.flush_superblock(pid, sb["next_free"], sb["free_head"], sb["node_count"], tx=tx)
 
     def allocate_page(self) -> int:
         with self._lock:

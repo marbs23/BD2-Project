@@ -7,7 +7,7 @@ import unittest
 
 from rtree.geometry import MBR, TID
 from rtree.page_store import PageStore, IOStats
-from rtree.rtree import RTree
+from rtree.rtree_index import RTree
 
 
 def make_tree():

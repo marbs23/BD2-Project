@@ -1,11 +1,16 @@
 import struct
+import threading
 from dataclasses import dataclass
 from heapq import heappush, heappop
 from itertools import count
-from typing import Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 from .geometry import MBR, TID
+from .lock_manager import LockManager
 from .page_store import IOStats, PageStore
+
+if TYPE_CHECKING:
+    from .transaction import Transaction
 
 PAGE_SIZE = PageStore.PAGE_SIZE
 
@@ -90,9 +95,25 @@ class RTreeNode:
 
 
 class RTree:
-    def __init__(self, store: PageStore):
+    """
+    **Nota arquitectónica (D2)**: El descenso con lock coupling usa candados S en rama
+    de lectura (cangrejo) y cadena X root→hoja para mutaciones con transacción, para
+    que ``_adjust_tree`` pueda escribir ancestros ya cubiertos por la cadena pesimista.
+    Strict 2PL puro en todo el descenso es opcional vía ``strict_2pl`` (reservado).
+    """
+
+    def __init__(
+        self,
+        store: PageStore,
+        lock_mgr: Optional[LockManager] = None,
+        strict_2pl: bool = False,
+    ):
         self.store = store
         self.stats = store.stats
+        self._lock_mgr = lock_mgr if lock_mgr is not None else LockManager()
+        self._strict_2pl = strict_2pl
+        self._tid_gen = count(1)
+        self._tid_mu = threading.Lock()
         sb = store.get_superblock()
         if sb["root_pid"] == 0:
             root_pid = store.allocate_page()
@@ -103,6 +124,18 @@ class RTree:
         else:
             store.pin_page(sb["root_pid"])
 
+    def begin_transaction(self) -> "Transaction":
+        from .transaction import Transaction
+
+        wal = getattr(self.store, "_wal", None)
+        if wal is None:
+            raise RuntimeError(
+                "Se requiere PageStore(..., wal=WriteAheadLog(...)) para begin_transaction()"
+            )
+        with self._tid_mu:
+            tid = next(self._tid_gen)
+        return Transaction(tid, self.store, self._lock_mgr, wal)
+
     def _root_pid(self) -> int:
         return self.store.get_root()
 
@@ -110,8 +143,82 @@ class RTree:
         data = self.store.read_page(pid)
         return RTreeNode.deserialize(pid, data)
 
-    def _write_node(self, node: RTreeNode) -> None:
-        self.store.write_page(node.page_id, node.serialize())
+    def _write_node(self, node: RTreeNode, tx: Optional["Transaction"] = None) -> None:
+        self.store.write_page(node.page_id, node.serialize(), tx=tx)
+
+    def _child_pid_for_point(self, node: RTreeNode, lon: float, lat: float) -> int:
+        point_mbr = MBR.from_point(lon, lat)
+        best_idx = min(
+            range(len(node.entries)),
+            key=lambda i: (
+                node.entries[i]["mbr"].area_enlargement(point_mbr),
+                node.entries[i]["mbr"].area(),
+            ),
+        )
+        return node.entries[best_idx]["child_pid"]
+
+    def _leaf_pid_for_point_readonly(self, lon: float, lat: float) -> int:
+        """
+        Desciende desde la raíz sin candados (solo lectura) con la misma heurística
+        que el crabbing. Sirve para comprobar, tras un descenso optimista, que el
+        árbol no cambió bajo nuestros pies (otra transacción pudo partir un ancestro).
+        """
+        pid = self._root_pid()
+        while True:
+            node = self._read_node(pid)
+            if node.is_leaf:
+                return pid
+            pid = self._child_pid_for_point(node, lon, lat)
+
+    def _descend_optimistic(
+        self,
+        lon: float,
+        lat: float,
+        leaf_lock: Literal["S", "X"],
+        tx: "Transaction",
+    ) -> tuple[list[int], int, bool]:
+        """
+        Cangrejo S hasta la hoja; en hoja upgrade a X si ``leaf_lock == 'X'``.
+
+        Tras fijar la hoja, compara con un descenso read-only: si difiere, otro hilo
+        pudo reestructurar mientras se soltaban S en padres → ``need_retry=True``;
+        el caller debe ``release_all`` y tomar el camino pesimista (D2).
+
+        TODO opcional: detectar cambio de MBR del padre sin split (estructura igual,
+        distinta geometría de entrada) — mismo gancho ``need_retry``.
+        """
+        pid = self._root_pid()
+        held: list[int] = []
+        while True:
+            self._lock_mgr.acquire(tx, pid, "S")
+            held.append(pid)
+            node = self._read_node(pid)
+            if node.is_leaf:
+                if leaf_lock == "X":
+                    self._lock_mgr.acquire(tx, pid, "X")
+                stable = self._leaf_pid_for_point_readonly(lon, lat)
+                need_retry = stable != pid
+                return held, pid, need_retry
+            child_pid = self._child_pid_for_point(node, lon, lat)
+            self._lock_mgr.acquire(tx, child_pid, "S")
+            self._lock_mgr.release(tx, pid)
+            held.pop()
+            pid = child_pid
+
+    def _descend_pessimistic(self, lon: float, lat: float, tx: "Transaction") -> tuple[list[int], int]:
+        """
+        Cadena X sobre root→…→hoja (sin soltar ancestros) para mutaciones que propagan
+        al árbol (insert/delete + ``_adjust_tree``).
+        """
+        path: list[int] = []
+        pid = self._root_pid()
+        while True:
+            self._lock_mgr.acquire(tx, pid, "X")
+            path.append(pid)
+            node = self._read_node(pid)
+            if node.is_leaf:
+                return path, pid
+            pid = self._child_pid_for_point(node, lon, lat)
 
     def _choose_subtree(self, node: RTreeNode, mbr: MBR) -> RTreeNode:
         if node.is_leaf:
@@ -122,7 +229,12 @@ class RTree:
         child = self._read_node(node.entries[best_idx]["child_pid"])
         return self._choose_subtree(child, mbr)
 
-    def _linear_split(self, node: RTreeNode, new_entry: dict) -> tuple[RTreeNode, RTreeNode]:
+    def _linear_split(
+        self,
+        node: RTreeNode,
+        new_entry: dict,
+        tx: Optional["Transaction"] = None,
+    ) -> tuple[RTreeNode, RTreeNode]:
         all_entries = node.entries + [new_entry]
 
         def pick_seeds_linear():
@@ -178,6 +290,8 @@ class RTree:
 
         node.entries = group1
         new_pid = self.store.allocate_page()
+        if tx is not None:
+            self._lock_mgr.acquire(tx, new_pid, "X")
         new_node = RTreeNode(new_pid, node.is_leaf, node.level, node.parent_pid)
         new_node.entries = group2
 
@@ -185,27 +299,34 @@ class RTree:
             for e in new_node.entries:
                 child = self._read_node(e["child_pid"])
                 child.parent_pid = new_pid
-                self._write_node(child)
+                self._write_node(child, tx)
 
         return node, new_node
 
-    def _adjust_tree(self, node: RTreeNode, split_node: Optional[RTreeNode] = None) -> None:
+    def _adjust_tree(
+        self,
+        node: RTreeNode,
+        split_node: Optional[RTreeNode] = None,
+        tx: Optional["Transaction"] = None,
+    ) -> None:
         if node.parent_pid == 0 and node.page_id == self._root_pid():
             if split_node:
                 new_root_pid = self.store.allocate_page()
+                if tx is not None:
+                    self._lock_mgr.acquire(tx, new_root_pid, "X")
                 new_root = RTreeNode(new_root_pid, is_leaf=False,
                                      level=node.level + 1, parent_pid=0)
                 node.parent_pid = new_root_pid
                 split_node.parent_pid = new_root_pid
-                self._write_node(node)
-                self._write_node(split_node)
+                self._write_node(node, tx)
+                self._write_node(split_node, tx)
                 new_root.entries = [
                     {"mbr": node.get_mbr(), "child_pid": node.page_id},
                     {"mbr": split_node.get_mbr(), "child_pid": split_node.page_id},
                 ]
-                self._write_node(new_root)
+                self._write_node(new_root, tx)
                 self.store.unpin_page(node.page_id)
-                self.store.set_root(new_root_pid)
+                self.store.set_root(new_root_pid, tx=tx)
                 self.store.pin_page(new_root_pid)
             return
 
@@ -218,19 +339,19 @@ class RTree:
         if split_node:
             split_entry = {"mbr": split_node.get_mbr(), "child_pid": split_node.page_id}
             if parent.is_full():
-                parent, new_parent = self._linear_split(parent, split_entry)
-                self._write_node(parent)
-                self._write_node(new_parent)
-                self._adjust_tree(parent, new_parent)
+                parent, new_parent = self._linear_split(parent, split_entry, tx)
+                self._write_node(parent, tx)
+                self._write_node(new_parent, tx)
+                self._adjust_tree(parent, new_parent, tx)
             else:
                 parent.entries.append(split_entry)
-                self._write_node(parent)
-                self._adjust_tree(parent)
+                self._write_node(parent, tx)
+                self._adjust_tree(parent, None, tx)
         else:
-            self._write_node(parent)
-            self._adjust_tree(parent)
+            self._write_node(parent, tx)
+            self._adjust_tree(parent, None, tx)
 
-    def insert(self, lon: float, lat: float, tid: TID) -> None:
+    def _insert_autocommit(self, lon: float, lat: float, tid: TID) -> None:
         point_mbr = MBR.from_point(lon, lat)
         root = self._read_node(self._root_pid())
         leaf = self._choose_subtree(root, point_mbr)
@@ -245,26 +366,88 @@ class RTree:
             self._write_node(leaf)
             self._adjust_tree(leaf)
 
-    def range_search(self, lon: float, lat: float, radius: float) -> SearchResult:
+    def insert(self, lon: float, lat: float, tid: TID, tx: Optional["Transaction"] = None) -> None:
+        if tx is None:
+            self._insert_autocommit(lon, lat, tid)
+            return
+
+        # Descenso optimista (need_retry interno si la hoja read-only ≠ hoja bloqueada).
+        self._descend_optimistic(lon, lat, "X", tx)
+        self._lock_mgr.release_all(tx.tid)
+
+        _, leaf_pid = self._descend_pessimistic(lon, lat, tx)
+        point_mbr = MBR.from_point(lon, lat)
+        leaf = self._read_node(leaf_pid)
+        entry = {"mbr": point_mbr, "tid_page": tid.page_id, "tid_slot": tid.slot_id}
+        if leaf.is_full():
+            leaf, new_leaf = self._linear_split(leaf, entry, tx)
+            self._write_node(leaf, tx)
+            self._write_node(new_leaf, tx)
+            self._adjust_tree(leaf, new_leaf, tx)
+        else:
+            leaf.entries.append(entry)
+            self._write_node(leaf, tx)
+            self._adjust_tree(leaf, None, tx)
+
+    def range_search(
+        self,
+        lon: float,
+        lat: float,
+        radius: float,
+        tx: Optional["Transaction"] = None,
+    ) -> SearchResult:
+        if tx is None:
+            before = self.stats.snapshot()
+            results: list[TID] = []
+            visited_mbrs: list[tuple] = []
+            stack = [self._root_pid()]
+
+            while stack:
+                pid = stack.pop()
+                node = self._read_node(pid)
+                node_mbr = node.get_mbr()
+                if node_mbr:
+                    visited_mbrs.append(node_mbr.to_tuple())
+                for e in node.entries:
+                    if not e["mbr"].intersects_circle(lon, lat, radius):
+                        continue
+                    if node.is_leaf:
+                        results.append(TID(e["tid_page"], e["tid_slot"]))
+                    else:
+                        stack.append(e["child_pid"])
+
+            after = self.stats.snapshot()
+            return SearchResult(
+                tids=results,
+                visited_mbrs=visited_mbrs,
+                query_point=(lon, lat),
+                query_radius=radius,
+                io_reads=after.reads - before.reads,
+                io_writes=after.writes - before.writes,
+            )
+
         before = self.stats.snapshot()
         results: list[TID] = []
         visited_mbrs: list[tuple] = []
-        stack = [self._root_pid()]
 
-        while stack:
-            pid = stack.pop()
-            node = self._read_node(pid)
-            node_mbr = node.get_mbr()
-            if node_mbr:
-                visited_mbrs.append(node_mbr.to_tuple())
-            for e in node.entries:
-                if not e["mbr"].intersects_circle(lon, lat, radius):
-                    continue
-                if node.is_leaf:
-                    results.append(TID(e["tid_page"], e["tid_slot"]))
-                else:
-                    stack.append(e["child_pid"])
+        def walk(pid: int) -> None:
+            self._lock_mgr.acquire(tx, pid, "S")
+            try:
+                node = self._read_node(pid)
+                node_mbr = node.get_mbr()
+                if node_mbr:
+                    visited_mbrs.append(node_mbr.to_tuple())
+                for e in node.entries:
+                    if not e["mbr"].intersects_circle(lon, lat, radius):
+                        continue
+                    if node.is_leaf:
+                        results.append(TID(e["tid_page"], e["tid_slot"]))
+                    else:
+                        walk(e["child_pid"])
+            finally:
+                self._lock_mgr.release(tx, pid)
 
+        walk(self._root_pid())
         after = self.stats.snapshot()
         return SearchResult(
             tids=results,
@@ -275,7 +458,7 @@ class RTree:
             io_writes=after.writes - before.writes,
         )
 
-    def knn(self, lon: float, lat: float, k: int) -> SearchResult:
+    def knn(self, lon: float, lat: float, k: int, tx: Optional["Transaction"] = None) -> SearchResult:
         before = self.stats.snapshot()
         heap: list = []
         results: list[tuple] = []
@@ -321,13 +504,28 @@ class RTree:
             io_writes=after.writes - before.writes,
         )
 
-    def delete(self, lon: float, lat: float, tid: TID) -> bool:
-        leaf, idx = self._find_leaf(self._root_pid(), lon, lat, tid)
-        if leaf is None:
+    def delete(self, lon: float, lat: float, tid: TID, tx: Optional["Transaction"] = None) -> bool:
+        if tx is None:
+            leaf, idx = self._find_leaf(self._root_pid(), lon, lat, tid)
+            if leaf is None:
+                return False
+            leaf.entries.pop(idx)
+            self._write_node(leaf)
+            self._condense_tree(leaf)
+            return True
+
+        _, leaf_pid = self._descend_pessimistic(lon, lat, tx)
+        leaf = self._read_node(leaf_pid)
+        idx = -1
+        for i, e in enumerate(leaf.entries):
+            if e["tid_page"] == tid.page_id and e["tid_slot"] == tid.slot_id:
+                idx = i
+                break
+        if idx < 0:
             return False
         leaf.entries.pop(idx)
-        self._write_node(leaf)
-        self._condense_tree(leaf)
+        self._write_node(leaf, tx)
+        self._condense_tree(leaf, tx)
         return True
 
     def _find_leaf(self, pid: int, lon: float, lat: float,
@@ -345,7 +543,7 @@ class RTree:
                     return result, idx
         return None, -1
 
-    def _condense_tree(self, node: RTreeNode) -> None:
+    def _condense_tree(self, node: RTreeNode, tx: Optional["Transaction"] = None) -> None:
         orphans: list[dict] = []
         current = node
 
@@ -365,7 +563,7 @@ class RTree:
                     if e["child_pid"] == current.page_id:
                         e["mbr"] = current.get_mbr()
                         break
-            self._write_node(parent)
+            self._write_node(parent, tx)
             current = parent
 
         root = self._read_node(self._root_pid())
@@ -375,10 +573,14 @@ class RTree:
             self.store.free_page(root.page_id)
             new_root = self._read_node(new_root_pid)
             new_root.parent_pid = 0
-            self._write_node(new_root)
-            self.store.set_root(new_root_pid)
+            self._write_node(new_root, tx)
+            self.store.set_root(new_root_pid, tx=tx)
             self.store.pin_page(new_root_pid)
 
+        # TODO (durabilidad / opcional +2 pts): si ``tx`` está activo, estas ``insert``
+        # deben ejecutarse con el mismo ``tx`` para que huérfanos pasen por WAL y locks;
+        # hoy son autocommit y un crash entre ``free_page`` y reinsert deja entradas
+        # inconsistentes respecto al log.
         for entry in orphans:
             if "tid_page" in entry:
                 self.insert(entry["mbr"].min_lon, entry["mbr"].min_lat,

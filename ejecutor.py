@@ -3,35 +3,21 @@ ejecutor.py
 ===========
 Capa que conecta el parser SQL con los 4 índices del proyecto.
 
-Flujo completo:
-  SQL string
-      ↓  Scanner
-  Lista de tokens
-      ↓  Parser
-  Nodos AST  (NodoCreateTable, NodoSelectPuntual, etc.)
-      ↓  Ejecutor
-  Llamada al índice correcto  (BPlusTree / SeqFile / ExtendibleHashFile / RTree)
-      ↓
-  Resultado + estadísticas de disco
+Flujo:
+  SQL -> Scanner -> Parser -> AST -> Ejecutor -> Índice (BPT/Seq/Hash/RTree)
 
-Uso:
-    from ejecutor import Ejecutor
-    db = Ejecutor()
-    db.ejecutar('CREATE TABLE books (book_key INT INDEX BPTREE) FROM FILE "books.csv";')
-    db.ejecutar('SELECT * FROM books WHERE book_key = 6;')
-    db.ejecutar('SELECT * FROM books WHERE book_key BETWEEN 1 AND 10;')
-    db.ejecutar('INSERT INTO books VALUES (500, "mi libro", "autor", 100, 4.5, 2020);')
-    db.ejecutar('DELETE FROM books WHERE book_key = 500;')
+Diferencia respecto a la versión inicial: los imports del RTree fueron
+corregidos para apuntar al módulo real (`rtree.rtree`, `rtree.page_store`,
+`rtree.geometry`) que vive en este repositorio. También se ajustó la firma
+de `PageStore` para incluir el `IOStats` requerido.
 """
 
-import time
 import os
+import time
 from typing import Any, Dict, List, Optional
 
-# ── parser (mismo archivo que construimos) ─────────────────────────────────────
 from parser_sql import (
     parsear,
-    NodoPrograma,
     NodoCreateTable,
     NodoSelectPuntual,
     NodoSelectRango,
@@ -41,147 +27,129 @@ from parser_sql import (
     NodoDelete,
 )
 
-# ── índices del proyecto ───────────────────────────────────────────────────────
-# Importamos con try/except para que el ejecutor funcione aunque falte alguno
+# ── índices ─────────────────────────────────────────────────────────────
 try:
     from bplustree import BPlusTree, Record as RecordBPT
     BPTREE_OK = True
 except ImportError:
     BPTREE_OK = False
-    print("[Ejecutor] BPlusTree no disponible")
 
 try:
     from sequential_file import SeqFile, Record as RecordSEQ
     SEQFILE_OK = True
 except ImportError:
     SEQFILE_OK = False
-    print("[Ejecutor] SeqFile no disponible")
 
 try:
     from extendible_hash import ExtendibleHashFile, Record as RecordHASH
     HASH_OK = True
 except ImportError:
     HASH_OK = False
-    print("[Ejecutor] ExtendibleHashFile no disponible")
 
 try:
-    from rtree.rtree_index import RTree          # ajusta el import a tu estructura de carpetas
+    from rtree.rtree_index import RTree
+    from rtree.page_store import PageStore, IOStats
+    from rtree.geometry import TID
     RTREE_OK = True
 except ImportError:
     RTREE_OK = False
-    print("[Ejecutor] RTree no disponible")
 
 
-# ── técnicas soportadas ────────────────────────────────────────────────────────
 TECNICAS_VALIDAS = {"BPTREE", "SEQUENTIAL", "HASH", "RTREE"}
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# RESULTADO: lo que devuelve cada ejecución
-# ══════════════════════════════════════════════════════════════════════════════
 class ResultadoEjecucion:
     def __init__(self, operacion: str, tabla: str):
-        self.operacion   = operacion   # "SELECT", "INSERT", etc.
-        self.tabla       = tabla
-        self.registros   : List[Any]   = []   # filas devueltas (para SELECT)
-        self.afectados   : int         = 0    # filas insertadas/borradas
-        self.ok          : bool        = True
-        self.mensaje     : str         = ""
-        self.tiempo_ms   : float       = 0.0
-        self.reads       : int         = 0
-        self.writes      : int         = 0
+        self.operacion = operacion
+        self.tabla = tabla
+        self.registros: List[Any] = []
+        self.afectados: int = 0
+        self.ok: bool = True
+        self.mensaje: str = ""
+        self.tiempo_ms: float = 0.0
+        self.reads: int = 0
+        self.writes: int = 0
 
     @property
-    def total_io(self): return self.reads + self.writes
+    def total_io(self) -> int:
+        return self.reads + self.writes
 
     def __repr__(self):
         if self.registros:
             return (f"[{self.operacion}] tabla={self.tabla} "
-                    f"filas={len(self.registros)} "
-                    f"io={self.total_io} tiempo={self.tiempo_ms:.2f}ms")
-        return (f"[{self.operacion}] tabla={self.tabla} "
-                f"ok={self.ok} msg='{self.mensaje}' "
-                f"io={self.total_io} tiempo={self.tiempo_ms:.2f}ms")
+                    f"filas={len(self.registros)} io={self.total_io} "
+                    f"tiempo={self.tiempo_ms:.2f}ms")
+        return (f"[{self.operacion}] tabla={self.tabla} ok={self.ok} "
+                f"msg='{self.mensaje}' io={self.total_io} "
+                f"tiempo={self.tiempo_ms:.2f}ms")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# EJECUTOR PRINCIPAL
-# ══════════════════════════════════════════════════════════════════════════════
 class Ejecutor:
-    """
-    Mantiene un catálogo de tablas en memoria.
-    Cada tabla tiene:
-      - índice    : instancia de BPlusTree / SeqFile / ExtendibleHashFile / RTree
-      - tecnica   : "BPTREE" | "SEQUENTIAL" | "HASH" | "RTREE"
-      - columnas  : lista de NodoColumna (para saber el esquema)
-      - col_clave : nombre de la columna con INDEX (la clave del índice)
-    """
-
     def __init__(self, directorio: str = "."):
-        """
-        directorio: carpeta donde se guardarán los archivos .bin de cada tabla.
-        """
         self.directorio = directorio
-        # catálogo: { nombre_tabla → info_tabla }
         self._catalogo: Dict[str, dict] = {}
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # PUNTO DE ENTRADA PÚBLICO
-    # ──────────────────────────────────────────────────────────────────────────
+    # ── API pública ─────────────────────────────────────────────────────
     def ejecutar(self, sql: str) -> List[ResultadoEjecucion]:
-        """
-        Parsea y ejecuta una o más sentencias SQL separadas por ;
-        Devuelve una lista de ResultadoEjecucion (uno por sentencia).
-        """
         try:
             programa = parsear(sql)
         except SyntaxError as e:
             r = ResultadoEjecucion("PARSE_ERROR", "")
-            r.ok      = False
+            r.ok = False
             r.mensaje = str(e)
             return [r]
 
-        resultados = []
-        for nodo in programa.sentencias:
-            r = self._ejecutar_nodo(nodo)
-            resultados.append(r)
-        return resultados
+        return [self._dispatch(n) for n in programa.sentencias]
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # DISPATCHER — decide qué método llamar según el tipo de nodo
-    # ──────────────────────────────────────────────────────────────────────────
-    def _ejecutar_nodo(self, nodo) -> ResultadoEjecucion:
-        if   isinstance(nodo, NodoCreateTable):   return self._crear_tabla(nodo)
-        elif isinstance(nodo, NodoSelectPuntual): return self._select_puntual(nodo)
-        elif isinstance(nodo, NodoSelectRango):   return self._select_rango(nodo)
-        elif isinstance(nodo, NodoSelectRadio):   return self._select_radio(nodo)
-        elif isinstance(nodo, NodoSelectKNN):     return self._select_knn(nodo)
-        elif isinstance(nodo, NodoInsert):        return self._insertar(nodo)
-        elif isinstance(nodo, NodoDelete):        return self._eliminar(nodo)
-        else:
-            r = ResultadoEjecucion("DESCONOCIDO", "")
-            r.ok = False; r.mensaje = f"Tipo de nodo no soportado: {type(nodo)}"
-            return r
+    def tablas(self) -> List[str]:
+        return list(self._catalogo.keys())
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # CREATE TABLE
-    # ══════════════════════════════════════════════════════════════════════════
+    def info_tabla(self, nombre: str) -> Optional[dict]:
+        info = self._catalogo.get(nombre)
+        if not info:
+            return None
+        return {
+            "tabla": nombre,
+            "tecnica": info["tecnica"],
+            "col_clave": info["col_clave"],
+            "columnas": [(c.nombre, c.tipo) for c in info["columnas"]],
+        }
+
+    def cerrar_todo(self) -> None:
+        for info in self._catalogo.values():
+            try:
+                info["indice"].close()
+            except Exception:
+                pass
+
+    # ── dispatcher ──────────────────────────────────────────────────────
+    def _dispatch(self, nodo) -> ResultadoEjecucion:
+        if isinstance(nodo, NodoCreateTable):   return self._crear_tabla(nodo)
+        if isinstance(nodo, NodoSelectPuntual): return self._select_puntual(nodo)
+        if isinstance(nodo, NodoSelectRango):   return self._select_rango(nodo)
+        if isinstance(nodo, NodoSelectRadio):   return self._select_radio(nodo)
+        if isinstance(nodo, NodoSelectKNN):     return self._select_knn(nodo)
+        if isinstance(nodo, NodoInsert):        return self._insertar(nodo)
+        if isinstance(nodo, NodoDelete):        return self._eliminar(nodo)
+        r = ResultadoEjecucion("DESCONOCIDO", "")
+        r.ok = False
+        r.mensaje = f"Tipo de nodo no soportado: {type(nodo)}"
+        return r
+
+    # ── CREATE ──────────────────────────────────────────────────────────
     def _crear_tabla(self, nodo: NodoCreateTable) -> ResultadoEjecucion:
         r = ResultadoEjecucion("CREATE TABLE", nodo.tabla)
         t0 = time.time()
 
-        # 1. detectar qué columna tiene INDEX y qué técnica usa
         col_clave = None
-        tecnica   = None
+        tecnica = None
         for col in nodo.columnas:
             if col.indice is not None:
                 col_clave = col.nombre
-                tecnica   = col.indice.upper()
+                tecnica = col.indice.upper()
                 break
-
         if tecnica is None:
-            # sin INDEX explícito usamos B+Tree por defecto
-            tecnica   = "BPTREE"
+            tecnica = "BPTREE"
             col_clave = nodo.columnas[0].nombre
 
         if tecnica not in TECNICAS_VALIDAS:
@@ -189,446 +157,298 @@ class Ejecutor:
             r.mensaje = f"Técnica '{tecnica}' no reconocida. Usa: {TECNICAS_VALIDAS}"
             return r
 
-        # 2. verificar disponibilidad del módulo
-        if tecnica == "BPTREE"     and not BPTREE_OK:
-            r.ok=False; r.mensaje="BPlusTree no importado"; return r
-        if tecnica == "SEQUENTIAL" and not SEQFILE_OK:
-            r.ok=False; r.mensaje="SeqFile no importado"; return r
-        if tecnica == "HASH"       and not HASH_OK:
-            r.ok=False; r.mensaje="ExtendibleHashFile no importado"; return r
-        if tecnica == "RTREE"      and not RTREE_OK:
-            r.ok=False; r.mensaje="RTree no importado"; return r
+        disponibles = {"BPTREE": BPTREE_OK, "SEQUENTIAL": SEQFILE_OK,
+                       "HASH": HASH_OK, "RTREE": RTREE_OK}
+        if not disponibles[tecnica]:
+            r.ok = False
+            r.mensaje = f"Módulo {tecnica} no disponible"
+            return r
 
-        # 3. construir rutas de archivo
         base = os.path.join(self.directorio, nodo.tabla)
-
-        # 4. crear el índice
         try:
             if tecnica == "BPTREE":
-                if nodo.archivo:
-                    indice = BPlusTree.from_csv(f"{base}_bpt.bin", nodo.archivo)
-                else:
-                    indice = BPlusTree(f"{base}_bpt.bin")
-
+                indice = (BPlusTree.from_csv(f"{base}_bpt.bin", nodo.archivo)
+                          if nodo.archivo else BPlusTree(f"{base}_bpt.bin"))
             elif tecnica == "SEQUENTIAL":
-                if nodo.archivo:
-                    indice = SeqFile.from_csv(f"{base}_seq.bin", nodo.archivo)
-                else:
-                    indice = SeqFile(f"{base}_seq.bin")
-
+                indice = (SeqFile.from_csv(f"{base}_seq.bin", nodo.archivo)
+                          if nodo.archivo else SeqFile(f"{base}_seq.bin"))
             elif tecnica == "HASH":
-                if nodo.archivo:
-                    indice = ExtendibleHashFile.from_csv(
-                        f"{base}_hash.bin", f"{base}_hash.json", nodo.archivo)
-                else:
-                    indice = ExtendibleHashFile(
-                        f"{base}_hash.bin", f"{base}_hash.json")
-
-            elif tecnica == "RTREE":
-                # El RTree de tu proyecto usa PageStore — lo inicializamos vacío
-                # Si tienes bulk_load_from_csv puedes llamarlo aquí
-                from rtree.rtree_index import RTree
-                from rtree.geometry import PageStore
-                store  = PageStore(f"{base}_rtree.bin")
+                indice = (ExtendibleHashFile.from_csv(
+                            f"{base}_hash.bin", f"{base}_hash.json", nodo.archivo)
+                          if nodo.archivo
+                          else ExtendibleHashFile(f"{base}_hash.bin", f"{base}_hash.json"))
+            else:  # RTREE
+                store = PageStore(f"{base}_rtree.bin", IOStats())
                 indice = RTree(store)
-                if nodo.archivo:
-                    indice.bulk_load_from_csv(
-                        nodo.archivo, lon_col="longitude", lat_col="latitude")
-
         except Exception as e:
-            r.ok=False; r.mensaje=f"Error creando índice: {e}"; return r
+            r.ok = False
+            r.mensaje = f"Error creando índice: {e}"
+            return r
 
-        # 5. registrar en el catálogo
         self._catalogo[nodo.tabla] = {
-            "indice"   : indice,
-            "tecnica"  : tecnica,
-            "columnas" : nodo.columnas,
+            "indice": indice,
+            "tecnica": tecnica,
+            "columnas": nodo.columnas,
             "col_clave": col_clave,
         }
-
-        # 6. métricas
         r.tiempo_ms = (time.time() - t0) * 1000
-        r = self._agregar_stats(r, indice)
-        r.mensaje = (f"Tabla '{nodo.tabla}' creada con técnica {tecnica} "
-                     f"sobre columna '{col_clave}'"
+        self._stats(r, indice)
+        r.mensaje = (f"Tabla '{nodo.tabla}' creada con {tecnica} sobre '{col_clave}'"
                      + (f" cargando '{nodo.archivo}'" if nodo.archivo else ""))
         return r
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # SELECT puntual → search()
-    # ══════════════════════════════════════════════════════════════════════════
+    # ── SELECT puntual ──────────────────────────────────────────────────
     def _select_puntual(self, nodo: NodoSelectPuntual) -> ResultadoEjecucion:
         r = ResultadoEjecucion("SELECT", nodo.tabla)
-        info = self._verificar_tabla(nodo.tabla, r)
-        if info is None: return r
+        info = self._verif(nodo.tabla, r)
+        if info is None:
+            return r
 
-        indice  = info["indice"]
+        indice = info["indice"]
         tecnica = info["tecnica"]
         t0 = time.time()
-        self._reset_stats(indice)
-
+        self._reset(indice)
         try:
             if tecnica == "RTREE":
-                # RTree no tiene search puntual directo; usamos range con radio 0
-                res = indice.range_search(float(nodo.valor), float(nodo.valor), 0)
-                r.registros = res.tids if res else []
-            else:
-                resultado = indice.search(nodo.valor)
-                r.registros = [resultado] if resultado else []
+                r.ok = False
+                r.mensaje = "RTree requiere POINT(...) IN ... RADIUS r"
+                return r
+            res = indice.search(nodo.valor)
+            r.registros = [res] if res else []
         except Exception as e:
-            r.ok=False; r.mensaje=str(e)
-
+            r.ok = False
+            r.mensaje = str(e)
         r.tiempo_ms = (time.time() - t0) * 1000
-        r = self._agregar_stats(r, indice)
-        if not r.registros:
+        self._stats(r, indice)
+        if not r.registros and r.ok:
             r.mensaje = f"No se encontró '{nodo.valor}' en {nodo.tabla}"
         return r
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # SELECT rango → range_search()
-    # ══════════════════════════════════════════════════════════════════════════
+    # ── SELECT BETWEEN ──────────────────────────────────────────────────
     def _select_rango(self, nodo: NodoSelectRango) -> ResultadoEjecucion:
         r = ResultadoEjecucion("SELECT BETWEEN", nodo.tabla)
-        info = self._verificar_tabla(nodo.tabla, r)
-        if info is None: return r
-
-        indice  = info["indice"]
+        info = self._verif(nodo.tabla, r)
+        if info is None:
+            return r
         tecnica = info["tecnica"]
-
         if tecnica == "HASH":
-            r.ok=False
-            r.mensaje="ExtendibleHash no soporta rangeSearch"
+            r.ok = False
+            r.mensaje = "ExtendibleHash no soporta range search"
             return r
         if tecnica == "RTREE":
-            r.ok=False
-            r.mensaje="Para RTree usa POINT+RADIUS en lugar de BETWEEN"
+            r.ok = False
+            r.mensaje = "Para RTree usa POINT+RADIUS"
             return r
 
+        indice = info["indice"]
         t0 = time.time()
-        self._reset_stats(indice)
-
+        self._reset(indice)
         try:
             r.registros = indice.range_search(nodo.inicio, nodo.fin)
         except Exception as e:
-            r.ok=False; r.mensaje=str(e)
-
+            r.ok = False
+            r.mensaje = str(e)
         r.tiempo_ms = (time.time() - t0) * 1000
-        r = self._agregar_stats(r, indice)
+        self._stats(r, indice)
         return r
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # SELECT espacial radio → RTree.range_search()
-    # ══════════════════════════════════════════════════════════════════════════
+    # ── SELECT RADIUS ───────────────────────────────────────────────────
     def _select_radio(self, nodo: NodoSelectRadio) -> ResultadoEjecucion:
         r = ResultadoEjecucion("SELECT RADIUS", nodo.tabla)
-        info = self._verificar_tabla(nodo.tabla, r)
-        if info is None: return r
-
-        if info["tecnica"] != "RTREE":
-            r.ok=False
-            r.mensaje=f"SELECT con RADIUS solo funciona con índice RTREE (tabla usa {info['tecnica']})"
+        info = self._verif(nodo.tabla, r)
+        if info is None:
             return r
-
+        if info["tecnica"] != "RTREE":
+            r.ok = False
+            r.mensaje = "RADIUS requiere índice RTREE"
+            return r
         indice = info["indice"]
         t0 = time.time()
-
         try:
-            resultado = indice.range_search(nodo.x, nodo.y, nodo.radio)
-            r.registros = resultado.tids
-            r.reads  = resultado.io_reads
-            r.writes = resultado.io_writes
+            res = indice.range_search(nodo.x, nodo.y, nodo.radio)
+            r.registros = list(getattr(res, "tids", res))
+            r.reads = getattr(res, "io_reads", 0)
+            r.writes = getattr(res, "io_writes", 0)
         except Exception as e:
-            r.ok=False; r.mensaje=str(e)
-
+            r.ok = False
+            r.mensaje = str(e)
         r.tiempo_ms = (time.time() - t0) * 1000
         return r
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # SELECT KNN → RTree.knn()
-    # ══════════════════════════════════════════════════════════════════════════
+    # ── SELECT KNN ──────────────────────────────────────────────────────
     def _select_knn(self, nodo: NodoSelectKNN) -> ResultadoEjecucion:
         r = ResultadoEjecucion("SELECT KNN", nodo.tabla)
-        info = self._verificar_tabla(nodo.tabla, r)
-        if info is None: return r
-
-        if info["tecnica"] != "RTREE":
-            r.ok=False
-            r.mensaje=f"SELECT con K solo funciona con índice RTREE (tabla usa {info['tecnica']})"
+        info = self._verif(nodo.tabla, r)
+        if info is None:
             return r
-
+        if info["tecnica"] != "RTREE":
+            r.ok = False
+            r.mensaje = "KNN requiere índice RTREE"
+            return r
         indice = info["indice"]
         t0 = time.time()
-
         try:
-            resultado = indice.knn(nodo.x, nodo.y, nodo.k)
-            r.registros = resultado.tids
-            r.reads  = resultado.io_reads
-            r.writes = resultado.io_writes
+            res = indice.knn(nodo.x, nodo.y, nodo.k)
+            r.registros = list(getattr(res, "tids", res))
+            r.reads = getattr(res, "io_reads", 0)
+            r.writes = getattr(res, "io_writes", 0)
         except Exception as e:
-            r.ok=False; r.mensaje=str(e)
-
+            r.ok = False
+            r.mensaje = str(e)
         r.tiempo_ms = (time.time() - t0) * 1000
         return r
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # INSERT → add() / insert()
-    # ══════════════════════════════════════════════════════════════════════════
+    # ── INSERT ──────────────────────────────────────────────────────────
     def _insertar(self, nodo: NodoInsert) -> ResultadoEjecucion:
         r = ResultadoEjecucion("INSERT", nodo.tabla)
-        info = self._verificar_tabla(nodo.tabla, r)
-        if info is None: return r
-
-        indice  = info["indice"]
+        info = self._verif(nodo.tabla, r)
+        if info is None:
+            return r
+        indice = info["indice"]
         tecnica = info["tecnica"]
-        cols    = info["columnas"]
+        vals = nodo.valores
         t0 = time.time()
-        self._reset_stats(indice)
-
-        try:
-            # construimos el Record según la técnica
-            # esperamos los valores en el mismo orden que las columnas definidas
-            vals = nodo.valores
-            rec  = self._construir_record(vals, tecnica)
-            if rec is None:
-                r.ok=False
-                r.mensaje=f"No se pudo construir el registro con valores {vals}"
-                return r
-
-            if tecnica in ("BPTREE", "SEQUENTIAL"):
-                indice.add(rec)
-            elif tecnica == "HASH":
-                indice.insert(rec)
-            elif tecnica == "RTREE":
-                # RTree necesita lon, lat y un TID
-                from rtree.rtree_index import TID
-                lon = float(vals[0]); lat = float(vals[1])
-                tid = TID(page_id=0, slot_id=0)   # TID simbólico
-                indice.insert(lon, lat, tid)
-
-            r.afectados = 1
-            r.mensaje   = f"Registro insertado en '{nodo.tabla}'"
-
-        except Exception as e:
-            r.ok=False; r.mensaje=str(e)
-
-        r.tiempo_ms = (time.time() - t0) * 1000
-        r = self._agregar_stats(r, indice)
-        return r
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # DELETE → remove()
-    # ══════════════════════════════════════════════════════════════════════════
-    def _eliminar(self, nodo: NodoDelete) -> ResultadoEjecucion:
-        r = ResultadoEjecucion("DELETE", nodo.tabla)
-        info = self._verificar_tabla(nodo.tabla, r)
-        if info is None: return r
-
-        indice  = info["indice"]
-        tecnica = info["tecnica"]
-        t0 = time.time()
-        self._reset_stats(indice)
-
+        self._reset(indice)
         try:
             if tecnica == "RTREE":
-                r.ok=False
-                r.mensaje="DELETE en RTree requiere coordenadas. Usa delete(lon, lat, tid) directamente."
-                return r
-
-            clave = nodo.valor
-            ok    = indice.remove(clave)
-            r.afectados = 1 if ok else 0
-            r.ok        = ok
-            r.mensaje   = (f"Registro {clave} eliminado de '{nodo.tabla}'"
-                           if ok else
-                           f"Registro {clave} no encontrado en '{nodo.tabla}'")
-
+                lon = float(vals[0])
+                lat = float(vals[1])
+                pid = int(vals[2]) if len(vals) > 2 else 0
+                slot = int(vals[3]) if len(vals) > 3 else 0
+                indice.insert(lon, lat, TID(pid, slot))
+            else:
+                rec = self._build_record(vals, tecnica)
+                if rec is None:
+                    r.ok = False
+                    r.mensaje = f"No se pudo construir el registro {vals}"
+                    return r
+                if tecnica in ("BPTREE", "SEQUENTIAL"):
+                    indice.add(rec)
+                else:  # HASH
+                    indice.insert(rec)
+            r.afectados = 1
+            r.mensaje = f"Registro insertado en '{nodo.tabla}'"
         except Exception as e:
-            r.ok=False; r.mensaje=str(e)
-
+            r.ok = False
+            r.mensaje = str(e)
         r.tiempo_ms = (time.time() - t0) * 1000
-        r = self._agregar_stats(r, indice)
+        self._stats(r, indice)
         return r
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # HELPERS INTERNOS
-    # ══════════════════════════════════════════════════════════════════════════
-    def _verificar_tabla(self, nombre: str, r: ResultadoEjecucion):
-        """Devuelve info de la tabla o None si no existe (y rellena r con el error)."""
+    # ── DELETE ──────────────────────────────────────────────────────────
+    def _eliminar(self, nodo: NodoDelete) -> ResultadoEjecucion:
+        r = ResultadoEjecucion("DELETE", nodo.tabla)
+        info = self._verif(nodo.tabla, r)
+        if info is None:
+            return r
+        if info["tecnica"] == "RTREE":
+            r.ok = False
+            r.mensaje = "DELETE en RTree requiere coordenadas; usar API directa"
+            return r
+        indice = info["indice"]
+        t0 = time.time()
+        self._reset(indice)
+        try:
+            ok = indice.remove(nodo.valor)
+            r.afectados = 1 if ok else 0
+            r.ok = ok
+            r.mensaje = (f"Registro {nodo.valor} eliminado" if ok
+                         else f"Registro {nodo.valor} no encontrado")
+        except Exception as e:
+            r.ok = False
+            r.mensaje = str(e)
+        r.tiempo_ms = (time.time() - t0) * 1000
+        self._stats(r, indice)
+        return r
+
+    # ── helpers ─────────────────────────────────────────────────────────
+    def _verif(self, nombre: str, r: ResultadoEjecucion):
         if nombre not in self._catalogo:
             r.ok = False
-            r.mensaje = (f"Tabla '{nombre}' no existe. "
-                         f"Ejecuta primero CREATE TABLE {nombre} ...")
+            r.mensaje = f"Tabla '{nombre}' no existe."
             return None
         return self._catalogo[nombre]
 
-    def _construir_record(self, vals: list, tecnica: str):
-        """
-        Construye el Record correcto según la técnica.
-        Se asume el orden:  id, title, author, pages, rating, year
-        compatible con el CSV del proyecto.
-        """
+    def _build_record(self, vals: list, tecnica: str):
         try:
-            id_    = int(vals[0])
-            title  = str(vals[1]) if len(vals) > 1 else ""
+            id_ = int(vals[0])
+            title = str(vals[1]) if len(vals) > 1 else ""
             author = str(vals[2]) if len(vals) > 2 else ""
-            pages  = int(vals[3]) if len(vals) > 3 else 0
+            pages = int(vals[3]) if len(vals) > 3 else 0
             rating = float(vals[4]) if len(vals) > 4 else 0.0
-            year   = int(vals[5]) if len(vals) > 5 else 0
-
-            if tecnica == "BPTREE" and BPTREE_OK:
+            year = int(vals[5]) if len(vals) > 5 else 0
+            if tecnica == "BPTREE":
                 return RecordBPT(id=id_, title=title, author=author,
                                  pages=pages, rating=rating, year=year)
-            elif tecnica == "SEQUENTIAL" and SEQFILE_OK:
+            if tecnica == "SEQUENTIAL":
                 return RecordSEQ(id=id_, title=title, author=author,
                                  pages=pages, rating=rating, year=year)
-            elif tecnica == "HASH" and HASH_OK:
+            if tecnica == "HASH":
                 return RecordHASH(id=id_, title=title, author=author,
                                   pages=pages, rating=rating, year=year)
         except (ValueError, IndexError):
             return None
         return None
 
-    def _reset_stats(self, indice):
-        """Resetea los contadores de I/O si el índice lo soporta."""
+    def _reset(self, indice) -> None:
         if hasattr(indice, "reset_stats"):
             indice.reset_stats()
         elif hasattr(indice, "reset_counters"):
             indice.reset_counters()
 
-    def _agregar_stats(self, r: ResultadoEjecucion, indice) -> ResultadoEjecucion:
-        """Copia reads/writes del índice al resultado."""
+    def _stats(self, r: ResultadoEjecucion, indice) -> None:
         if hasattr(indice, "get_stats"):
-            stats    = indice.get_stats()
-            r.reads  = stats.get("reads",  0)
-            r.writes = stats.get("writes", 0)
-        elif hasattr(indice, "disk_reads"):
-            r.reads  = indice.disk_reads
-            r.writes = indice.disk_writes
-        return r
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # ACCESO AL CATÁLOGO (útil para el frontend)
-    # ──────────────────────────────────────────────────────────────────────────
-    def tablas(self) -> List[str]:
-        return list(self._catalogo.keys())
-
-    def info_tabla(self, nombre: str) -> Optional[dict]:
-        info = self._catalogo.get(nombre)
-        if not info: return None
-        return {
-            "tabla"    : nombre,
-            "tecnica"  : info["tecnica"],
-            "col_clave": info["col_clave"],
-            "columnas" : [(c.nombre, c.tipo) for c in info["columnas"]],
-        }
-
-    def cerrar_todo(self):
-        """Cierra todos los archivos abiertos."""
-        for nombre, info in self._catalogo.items():
             try:
-                info["indice"].close()
+                s = indice.get_stats()
+                r.reads = s.get("reads", 0)
+                r.writes = s.get("writes", 0)
+                return
             except Exception:
                 pass
+        if hasattr(indice, "disk_reads"):
+            r.reads = indice.disk_reads
+            r.writes = indice.disk_writes
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# DEMO — prueba el ejecutor con BPlusTree (el único que tenemos disponible aquí)
-# ══════════════════════════════════════════════════════════════════════════════
-def _imprimir_resultado(resultados):
-    for r in resultados:
-        estado = "✓" if r.ok else "✗"
-        print(f"\n  {estado} [{r.operacion}] tabla='{r.tabla}'")
-        if r.registros:
-            print(f"    filas devueltas: {len(r.registros)}")
-            for reg in r.registros[:3]:   # mostramos máximo 3
-                print(f"      → {reg}")
-            if len(r.registros) > 3:
-                print(f"      ... y {len(r.registros)-3} más")
-        if r.mensaje:
-            print(f"    msg: {r.mensaje}")
-        print(f"    io: {r.reads} reads + {r.writes} writes = {r.total_io} total")
-        print(f"    tiempo: {r.tiempo_ms:.3f} ms")
+# ── demo CLI ────────────────────────────────────────────────────────────
+def _print(rs):
+    for r in rs:
+        ok = "✓" if r.ok else "✗"
+        print(f"  {ok} [{r.operacion}] tabla='{r.tabla}' "
+              f"filas={len(r.registros)} io={r.total_io} "
+              f"t={r.tiempo_ms:.2f}ms  msg={r.mensaje}")
 
 
 if __name__ == "__main__":
-    import os
-    # limpiar archivos de prueba anteriores
     for f in ["demo_books_bpt.bin"]:
-        if os.path.exists(f): os.remove(f)
+        if os.path.exists(f):
+            os.remove(f)
 
-    print("=" * 65)
-    print("  DEMO EJECUTOR SQL — B+ Tree")
-    print("=" * 65)
+    db = Ejecutor(".")
+    print("▶ CREATE")
+    _print(db.ejecutar(
+        'CREATE TABLE demo_books (book_key INT INDEX BPTREE, title TEXT, '
+        'author TEXT, pages INT, rating FLOAT, year INT);'))
 
-    db = Ejecutor(directorio=".")
+    print("\n▶ INSERT 10")
+    sql = " ".join(
+        f'INSERT INTO demo_books VALUES ({i}, "L{i}", "A{i}", {100+i}, {3+i*0.1:.1f}, {2000+i});'
+        for i in range(1, 11))
+    _print(db.ejecutar(sql))
 
-    # ── 1. CREATE TABLE (sin CSV, solo estructura) ──────────────────────────
-    print("\n▶ CREATE TABLE")
-    r = db.ejecutar(
-        'CREATE TABLE demo_books '
-        '(book_key INT INDEX BPTREE, title TEXT, author TEXT, '
-        ' pages INT, average_rating FLOAT, published_date INT);'
-    )
-    _imprimir_resultado(r)
+    print("\n▶ SELECT puntual")
+    _print(db.ejecutar('SELECT * FROM demo_books WHERE book_key = 5;'))
 
-    # ── 2. INSERT varios registros ───────────────────────────────────────────
-    print("\n▶ INSERT (10 registros)")
-    sentencias_insert = " ".join([
-        f'INSERT INTO demo_books VALUES ({i}, "Libro {i}", "Autor {i}", {100+i}, {3.0 + i*0.1:.1f}, {2000+i});'
-        for i in range(1, 11)
-    ])
-    r = db.ejecutar(sentencias_insert)
-    _imprimir_resultado(r)
+    print("\n▶ SELECT BETWEEN")
+    _print(db.ejecutar('SELECT * FROM demo_books WHERE book_key BETWEEN 3 AND 7;'))
 
-    # ── 3. SELECT puntual ────────────────────────────────────────────────────
-    print("\n▶ SELECT puntual (book_key = 5)")
-    r = db.ejecutar("SELECT * FROM demo_books WHERE book_key = 5;")
-    _imprimir_resultado(r)
+    print("\n▶ DELETE")
+    _print(db.ejecutar('DELETE FROM demo_books WHERE book_key = 5;'))
 
-    # ── 4. SELECT rango ──────────────────────────────────────────────────────
-    print("\n▶ SELECT BETWEEN (book_key BETWEEN 3 AND 7)")
-    r = db.ejecutar("SELECT * FROM demo_books WHERE book_key BETWEEN 3 AND 7;")
-    _imprimir_resultado(r)
-
-    # ── 5. DELETE ────────────────────────────────────────────────────────────
-    print("\n▶ DELETE (book_key = 5)")
-    r = db.ejecutar("DELETE FROM demo_books WHERE book_key = 5;")
-    _imprimir_resultado(r)
-
-    # ── 6. SELECT después de borrar ──────────────────────────────────────────
-    print("\n▶ SELECT puntual después de DELETE (book_key = 5, debe ser vacío)")
-    r = db.ejecutar("SELECT * FROM demo_books WHERE book_key = 5;")
-    _imprimir_resultado(r)
-
-    # ── 7. Error: tabla no existe ────────────────────────────────────────────
-    print("\n▶ SELECT en tabla inexistente (debe dar error)")
-    r = db.ejecutar("SELECT * FROM tabla_fantasma WHERE book_key = 1;")
-    _imprimir_resultado(r)
-
-    # ── 8. Error: sintaxis incorrecta ────────────────────────────────────────
-    print("\n▶ SQL con error de sintaxis")
-    r = db.ejecutar("SELECT FROM demo_books WHERE book_key = 1;")
-    _imprimir_resultado(r)
-
-    # ── 9. Múltiples sentencias en un solo string ────────────────────────────
-    print("\n▶ Múltiples sentencias en un call")
-    r = db.ejecutar("""
-        INSERT INTO demo_books VALUES (99, "Libro 99", "Autor 99", 300, 4.9, 2024);
-        SELECT * FROM demo_books WHERE book_key = 99;
-        DELETE FROM demo_books WHERE book_key = 99;
-        SELECT * FROM demo_books WHERE book_key = 99;
-    """)
-    _imprimir_resultado(r)
-
-    print("\n▶ Info de tabla")
-    print(f"  tablas activas: {db.tablas()}")
-    print(f"  info: {db.info_tabla('demo_books')}")
+    print("\n▶ SELECT post-DELETE")
+    _print(db.ejecutar('SELECT * FROM demo_books WHERE book_key = 5;'))
 
     db.cerrar_todo()
-    # limpiar
     for f in ["demo_books_bpt.bin"]:
-        if os.path.exists(f): os.remove(f)
-
-    print("\n" + "=" * 65)
-    print("  Demo finalizada")
-    print("=" * 65)
+        if os.path.exists(f):
+            os.remove(f)
