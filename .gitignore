@@ -8,3 +8,7 @@ session.log
 .vscode/
 venv/
 .env
+*.log
+*.bin
+Clases_BD2/
+docs/
