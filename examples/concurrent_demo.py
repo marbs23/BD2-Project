@@ -24,7 +24,7 @@ import time
 from rtree.geometry import TID
 from rtree.lock_manager import DeadlockError, LockManager
 from rtree.page_store import IOStats, PageStore
-from rtree.rtree import RTree
+from rtree.rtree_index import RTree
 from rtree.wal import WriteAheadLog
 
 # ── logger thread-safe ──────────────────────────────────────────────────────

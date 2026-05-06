@@ -47,7 +47,7 @@ except ImportError:
     HASH_OK = False
 
 try:
-    from rtree.rtree import RTree
+    from rtree.rtree_index import RTree
     from rtree.page_store import PageStore, IOStats
     from rtree.geometry import TID
     RTREE_OK = True

@@ -2,7 +2,7 @@ import struct
 import unittest
 
 from rtree.geometry import MBR, TID
-from rtree.rtree import RTreeNode, M, PAGE_SIZE
+from rtree.rtree_index import RTreeNode, M, PAGE_SIZE
 
 
 class TestNodeSerialization(unittest.TestCase):
