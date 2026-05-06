@@ -38,13 +38,14 @@ class LockManager:
     - ``tx.aborted: bool`` lectura/escritura thread-safe (p. ej. bajo un ``threading.Lock``)
     """
 
-    def __init__(self) -> None:
+    def __init__(self, event_cb=None) -> None:
         self._mu = threading.RLock()
         self._cv = threading.Condition(self._mu)
         self._locks: dict[int, dict] = {}
         self._tx_pages: dict[int, set[int]] = defaultdict(set)
         self._tx_refs: dict[int, object] = {}
         self._waits_for: dict[int, set[int]] = {}
+        self._event_cb = event_cb
 
     def register_tx(self, tx: object) -> None:
         self._tx_refs[int(getattr(tx, "tid"))] = tx
@@ -52,13 +53,18 @@ class LockManager:
     def acquire(self, tx: object, pid: int, mode: LockMode) -> None:
         tid = int(getattr(tx, "tid"))
         self._tx_refs[tid] = tx
+        _notified_wait = False
         while True:
             with self._mu:
                 if bool(getattr(tx, "aborted")):
                     raise DeadlockError(tid)
                 if self._can_grant(tx, pid, mode):
                     self._grant(tx, pid, mode)
+                    self._notify("LOCK", tid, pid, mode)
                     return
+                if not _notified_wait:
+                    self._notify("WAIT", tid, pid, mode)
+                    _notified_wait = True
                 self._add_waiter(tx, pid, mode)
                 self._rebuild_waits_for()
                 cycle = self._find_cycle_on_path(tid)
@@ -88,6 +94,14 @@ class LockManager:
         with self._mu:
             self._release_all_locked(tid)
             self._cv.notify_all()
+
+    def _notify(self, event: str, tid: int, pid: int, mode: str) -> None:
+        """Llama al event_cb si está configurado. Errores en el callback se silencian."""
+        if self._event_cb is not None:
+            try:
+                self._event_cb(event, tid, pid, mode)
+            except Exception:
+                pass
 
     def _release_all_locked(self, tid: int) -> None:
         for pid in list(self._tx_pages.get(tid, ())):
