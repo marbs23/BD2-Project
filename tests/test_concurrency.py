@@ -16,7 +16,7 @@ import unittest
 from rtree.geometry import TID
 from rtree.lock_manager import DeadlockError
 from rtree.page_store import IOStats, PageStore
-from rtree.rtree import RTree
+from rtree.rtree_index import RTree
 from rtree.transaction import Transaction
 from rtree.wal import WriteAheadLog
 
