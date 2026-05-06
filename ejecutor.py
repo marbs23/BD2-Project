@@ -402,6 +402,10 @@ class Ejecutor:
                 s = indice.get_stats()
                 r.reads = s.get("reads", 0)
                 r.writes = s.get("writes", 0)
+                # Para BPlusTree, obtener el número de registros del header
+                if hasattr(indice, "_read_header"):
+                    root_page, total_pages, height, total_records = indice._read_header()
+                    r.afectados = total_records
                 return
             except Exception:
                 pass
@@ -416,7 +420,7 @@ def _print(rs):
         ok = "✓" if r.ok else "✗"
         print(f"  {ok} [{r.operacion}] tabla='{r.tabla}' "
               f"filas={len(r.registros)} io={r.total_io} "
-              f"t={r.tiempo_ms:.2f}ms  msg={r.mensaje}")
+              f"afectados={r.afectados} t={r.tiempo_ms:.2f}ms  msg={r.mensaje}")
 
 
 if __name__ == "__main__":

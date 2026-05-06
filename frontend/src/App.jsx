@@ -17,25 +17,25 @@ import {
 
 
 const App = () => {
-  const [tables, setTables] = useState({
-    users: [
-      { id: 1, name: 'Alejandro García', email: 'ale@example.com', role_id: 1, status: 'Activo' },
-      { id: 2, name: 'María López', email: 'maria@example.com', role_id: 2, status: 'Inactivo' },
-      { id: 3, name: 'Roberto Sanz', email: 'roberto@example.com', role_id: 3, status: 'Activo' },
-      { id: 4, name: 'Lucía Fernández', email: 'lucia@example.com', role_id: 3, status: 'Activo' },
-    ],
-    roles: [
-      { id: 1, role_name: 'Administrador', permissions: 'Full Access' },
-      { id: 2, role_name: 'Editor', permissions: 'Write/Read' },
-      { id: 3, role_name: 'Usuario', permissions: 'Read Only' },
-    ]
-  });
+  const [tables, setTables] = useState({});
 
-  const [activeTab, setActiveTab] = useState('explorer'); // 'explorer' o 'console'
-  const [sqlQuery, setSqlQuery] = useState('SELECT users.name, roles.role_name \nFROM users \nJOIN roles ON users.role_id = roles.id');
+  const [activeTab, setActiveTab] = useState('upload'); // 'explorer', 'console', 'upload'
+  const [sqlQuery, setSqlQuery] = useState('SELECT * FROM test WHERE id = 1;');
   const [queryResult, setQueryResult] = useState(null);
   const [queryError, setQueryError] = useState(null);
   const [notification, setNotification] = useState(null);
+  
+  // Estados para estadísticas y gestión de índices
+  const [stats, setStats] = useState(null);
+  const [indexTypes, setIndexTypes] = useState(null);
+  const [selectedIndexType, setSelectedIndexType] = useState('BPTREE');
+  const [concurrencyStats, setConcurrencyStats] = useState(null);
+  const [showStats, setShowStats] = useState(false);
+  
+  // Estados para manejo de archivos CSV
+  const [csvFile, setCsvFile] = useState(null);
+  const [tableName, setTableName] = useState('');
+  const [tableColumns, setTableColumns] = useState('');
 
   // Notificaciones
   const showNotification = (msg) => {
@@ -43,50 +43,224 @@ const App = () => {
     setTimeout(() => setNotification(null), 3000);
   };
 
-  // MOTOR de consultas
-  const executeQuery = () => {
+  // MOTOR de consultas - comunicación con backend
+  const executeQuery = async () => {
     setQueryError(null);
-    const query = sqlQuery.toLowerCase().trim().replace(/\s+/g, ' ');
+    setQueryResult(null);
 
     try {
-      if (query === 'select * from users') {
-        setQueryResult(tables.users);
-        return;
-      }
+      const response = await fetch('http://localhost:8000/api/execute', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query: sqlQuery,
+          database_path: "."
+        })
+      });
 
-      if (query === 'select * from roles') {
-        setQueryResult(tables.roles);
-        return;
-      }
+      const result = await response.json();
 
-      if (query.includes('join') && query.includes('on')) {
-        const joinedData = tables.users.map(user => {
-          const role = tables.roles.find(r => r.id === user.role_id);
-          return {
-            id: user.id,
-            user_name: user.name,
-            email: user.email,
-            role_name: role ? role.role_name : 'N/A',
-            permissions: role ? role.permissions : 'N/A'
-          };
-        });
-        setQueryResult(joinedData);
-        showNotification('Query JOIN ejecutada con éxito');
-        return;
+      if (result.success) {
+        setQueryResult(result.data || []);
+        showNotification(result.message || 'Consulta ejecutada con éxito');
+        // Actualizar estadísticas después de cada consulta
+        loadStats();
+      } else {
+        setQueryError(result.error || result.message || 'Error en la consulta');
+        showNotification('Error en la consulta', 'error');
       }
-
-      if (query.includes('where status = \'activo\'')) {
-        setQueryResult(tables.users.filter(u => u.status === 'Activo'));
-        return;
-      }
-
-      throw new Error("Sintaxis no soportada en este simulador. Prueba con: SELECT * FROM users o un JOIN entre users y roles.");
 
     } catch (err) {
-      setQueryError(err.message);
-      setQueryResult(null);
+      setQueryError('Error de conexión con el backend: ' + err.message);
+      showNotification('No se pudo conectar con el backend', 'error');
     }
   };
+
+  // Cargar estadísticas del backend (optimizado)
+  const loadStats = async () => {
+    try {
+      // Solo hacer peticiones si no hay una en curso
+      if (window.loadingStats) return;
+      window.loadingStats = true;
+
+      const [statsResponse, indexTypesResponse, concurrencyResponse] = await Promise.all([
+        fetch('http://localhost:8000/api/stats'),
+        fetch('http://localhost:8000/api/index-types'),
+        fetch('http://localhost:8000/api/concurrency/stats')
+      ]);
+
+      const statsData = await statsResponse.json();
+      const indexTypesData = await indexTypesResponse.json();
+      const concurrencyData = await concurrencyResponse.json();
+
+      if (statsData.success) setStats(statsData.stats);
+      if (indexTypesData.success) setIndexTypes(indexTypesData.index_types);
+      if (concurrencyData.success) setConcurrencyStats(concurrencyData.stats);
+
+    } catch (err) {
+      console.error('Error cargando estadísticas:', err);
+    } finally {
+      window.loadingStats = false;
+    }
+  };
+
+  // Autocompletar campos basados en el nombre del archivo CSV
+  const autoFillFields = (fileName) => {
+    const fileNameLower = fileName.toLowerCase();
+    
+    // Mapeo de archivos conocidos a sus configuraciones
+    const fileConfigs = {
+      'books_1000.csv': {
+        tableName: 'books',
+        columns: 'id INT INDEX BPTREE, title TEXT, author TEXT, pages INT, average_rating FLOAT, published_date INT'
+      },
+      'books_10000.csv': {
+        tableName: 'books',
+        columns: 'id INT INDEX BPTREE, title TEXT, author TEXT, pages INT, average_rating FLOAT, published_date INT'
+      },
+      'books_100000.csv': {
+        tableName: 'books',
+        columns: 'id INT INDEX BPTREE, title TEXT, author TEXT, pages INT, average_rating FLOAT, published_date INT'
+      },
+      'books_1000000.csv': {
+        tableName: 'books',
+        columns: 'id INT INDEX BPTREE, title TEXT, author TEXT, pages INT, average_rating FLOAT, published_date INT'
+      },
+    };
+
+    const config = fileConfigs[fileNameLower];
+    if (config) {
+      setTableName(config.tableName);
+      setTableColumns(config.columns);
+    }
+  };
+
+  // Crear tabla desde archivo CSV
+  const createTableFromCSV = async () => {
+    if (!csvFile || !tableName || !tableColumns) {
+      showNotification('Por favor completa todos los campos', 'error');
+      return;
+    }
+
+    try {
+      // Parsear las columnas del textarea
+      const columns = tableColumns.split(',').map(col => {
+        const parts = col.trim().split(' ');
+        return {
+          name: parts[0],
+          type: parts[1] || 'TEXT',
+          index: parts.includes('INDEX')
+        };
+      });
+
+      // Crear FormData para enviar el archivo
+      const formData = new FormData();
+      formData.append('table_name', tableName);
+      formData.append('columns', JSON.stringify(columns.reduce((acc, col) => {
+        acc[col.name] = col.type;
+        return acc;
+      }, {})));
+      formData.append('file_path', csvFile.name);
+      formData.append('database_path', '.');
+
+      const response = await fetch('http://localhost:8000/api/create-table-from-file', {
+        method: 'POST',
+        body: formData
+      });
+
+      const result = await response.json();
+      
+      if (result.success) {
+        showNotification(`Tabla ${tableName} creada con ${result.records_loaded} registros`);
+        loadStats();
+        // Limpiar formulario
+        setCsvFile(null);
+        setTableName('');
+        setTableColumns('');
+        document.getElementById('csv-input').value = '';
+        document.getElementById('columns-input').value = '';
+      } else {
+        showNotification('Error creando tabla: ' + (result.error || result.message), 'error');
+      }
+
+    } catch (err) {
+      showNotification('Error de conexión: ' + err.message, 'error');
+    }
+  };
+
+  // Crear tabla con índice específico
+  const createTableWithIndex = async (tableName, columns, indexType) => {
+    try {
+      const columnsDef = columns.map(col => `${col.name} ${col.type}${col.index ? ` INDEX ${indexType}` : ''}`).join(', ');
+      const createSQL = `CREATE TABLE ${tableName} (${columnsDef});`;
+
+      const response = await fetch('http://localhost:8000/api/execute', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query: createSQL,
+          database_path: "."
+        })
+      });
+
+      const result = await response.json();
+      
+      if (result.success) {
+        showNotification(`Tabla ${tableName} creada con índice ${indexType}`);
+        loadStats();
+      } else {
+        showNotification('Error creando tabla: ' + (result.error || result.message), 'error');
+      }
+
+    } catch (err) {
+      showNotification('Error de conexión: ' + err.message, 'error');
+    }
+  };
+
+  // Ejecutar benchmark de índice
+  const runBenchmark = async (tableName, column, indexType) => {
+    try {
+      const response = await fetch('http://localhost:8000/api/index-performance', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          table_name: tableName,
+          index_type: indexType,
+          column_name: column
+        })
+      });
+
+      const result = await response.json();
+      
+      if (result.success) {
+        showNotification(`Benchmark completado: ${result.summary.successful_operations}/${result.summary.total_operations} operaciones exitosas`);
+        console.log('Benchmark results:', result);
+      } else {
+        showNotification('Error en benchmark: ' + (result.error || result.message), 'error');
+      }
+
+    } catch (err) {
+      showNotification('Error de conexión: ' + err.message, 'error');
+    }
+  };
+
+  // Cargar estadísticas al montar el componente
+  useEffect(() => {
+    loadStats();
+    // Solo actualizar estadísticas cuando la pestaña esté activa y cada 30 segundos
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        loadStats();
+      }
+    }, 30000); // Actualizar cada 30 segundos en lugar de 5
+    return () => clearInterval(interval);
+  }, []);
 
 
   return (
@@ -120,6 +294,12 @@ const App = () => {
             <div>
               <p className="text-xs font-semibold text-slate-500 uppercase mb-3 px-2">Herramientas</p>
               <button 
+                onClick={() => setActiveTab('upload')}
+                className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${activeTab === 'upload' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'hover:bg-slate-800 text-slate-400'}`}
+              >
+                <Download size={16} /> Subir CSV
+              </button>
+              <button 
                 onClick={() => setActiveTab('console')}
                 className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${activeTab === 'console' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'hover:bg-slate-800 text-slate-400'}`}
               >
@@ -141,10 +321,10 @@ const App = () => {
               </div>
               <nav className="flex gap-6">
                 <button 
-                  onClick={() => setActiveTab('explorer')}
-                  className={`text-sm font-medium pb-5 pt-5 border-b-2 transition-all ${activeTab === 'explorer' ? 'border-indigo-500 text-white' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
+                  onClick={() => setActiveTab('upload')}
+                  className={`text-sm font-medium pb-5 pt-5 border-b-2 transition-all ${activeTab === 'upload' ? 'border-indigo-500 text-white' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
                 >
-                  Explorador de Datos
+                  Subir CSV
                 </button>
                 <button 
                   onClick={() => setActiveTab('console')}
@@ -163,97 +343,129 @@ const App = () => {
           {/* Area de Trabajo */}
           <section className="flex-1 overflow-auto p-6">
             
-            {activeTab === 'explorer' ? (
-              <div className="animate-in fade-in duration-300">
-                <div className="flex justify-between items-center mb-6">
-                  <h3 className="text-xl font-semibold flex items-center gap-2">
-                    <TableIcon className="text-slate-500" /> Tabla: users
+            {activeTab === 'upload' ? (
+              <div className="animate-in fade-in duration-300 p-6">
+                <div className="max-w-2xl mx-auto">
+                  <h3 className="text-xl font-semibold mb-6 flex items-center gap-2">
+                    <Download className="text-slate-500" /> Subir Archivo CSV
                   </h3>
-                  <button className="bg-indigo-600 hover:bg-indigo-700 text-white text-sm px-4 py-2 rounded-lg flex items-center gap-2 transition-all">
-                    <Plus size={16} /> Añadir Fila
-                  </button>
-                </div>
-                
-                <div className="bg-[#1e293b] rounded-xl border border-slate-700 overflow-hidden shadow-2xl">
-                  <table className="w-full text-left border-collapse">
-                    <thead className="bg-slate-800/50 text-slate-400 text-xs uppercase">
-                      <tr>
-                        <th className="px-6 py-4 border-b border-slate-700">id</th>
-                        <th className="px-6 py-4 border-b border-slate-700">name</th>
-                        <th className="px-6 py-4 border-b border-slate-700">email</th>
-                        <th className="px-6 py-4 border-b border-slate-700">role_id</th>
-                        <th className="px-6 py-4 border-b border-slate-700 text-right">Acciones</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-700/50">
-                      {tables.users.map(user => (
-                        <tr key={user.id} className="hover:bg-slate-800/30 transition-colors">
-                          <td className="px-6 py-4 font-mono text-indigo-400 text-sm">{user.id}</td>
-                          <td className="px-6 py-4 text-sm font-medium">{user.name}</td>
-                          <td className="px-6 py-4 text-sm text-slate-400">{user.email}</td>
-                          <td className="px-6 py-4 text-sm">
-                            <span className="bg-slate-700 px-2 py-0.5 rounded text-xs">{user.role_id}</span>
-                          </td>
-                          <td className="px-6 py-4 text-right">
-                             <button className="text-slate-500 hover:text-red-400 p-1"><Trash2 size={16} /></button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            ) : (
-              <div className="h-full flex flex-col gap-4 animate-in slide-in-from-bottom-4 duration-300">
-                {/* Editor de SQL */}
-                <div className="flex-none bg-[#1e293b] rounded-xl border border-slate-700 overflow-hidden shadow-xl">
-                  <div className="bg-slate-800 px-4 py-2 border-b border-slate-700 flex justify-between items-center">
-                    <span className="text-xs font-bold text-slate-400 flex items-center gap-2">
-                      <Terminal size={14} /> SQL QUERY EDITOR
-                    </span>
+                  
+                  <div className="bg-[#1e293b] rounded-xl border border-slate-700 p-6 space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-slate-300 mb-2">Nombre de la Tabla</label>
+                      <input
+                        type="text"
+                        value={tableName}
+                        onChange={(e) => setTableName(e.target.value)}
+                        placeholder="ej: users, products, etc."
+                        className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium text-slate-300 mb-2">Definición de Columnas</label>
+                      <textarea
+                        id="columns-input"
+                        value={tableColumns}
+                        onChange={(e) => setTableColumns(e.target.value)}
+                        placeholder="id INT INDEX BPTREE, name TEXT, email TEXT INDEX HASH, ..."
+                        className="w-full h-20 px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-sm"
+                      />
+                      <p className="text-xs text-slate-500 mt-1">Formato: columna1 TIPO [INDEX TIPO_INDICE], columna2 TIPO, ...</p>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium text-slate-300 mb-2">Archivo CSV</label>
+                      <input
+                        id="csv-input"
+                        type="file"
+                        accept=".csv"
+                        onChange={(e) => {
+              const file = e.target.files[0];
+              setCsvFile(file);
+              if (file) {
+                autoFillFields(file.name);
+              }
+            }}
+                        className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-slate-200 file:mr-2 file:py-1 file:px-3"
+                      />
+                      {csvFile && (
+                        <p className="text-sm text-slate-400 mt-2">
+                          Archivo seleccionado: <span className="text-indigo-400">{csvFile.name}</span>
+                        </p>
+                      )}
+                    </div>
+                    
                     <div className="flex gap-2">
-                      <button 
-                        onClick={() => setSqlQuery('')}
-                        className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
-                        title="Limpiar"
+                      <select
+                        value={selectedIndexType}
+                        onChange={(e) => setSelectedIndexType(e.target.value)}
+                        className="flex-1 px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                       >
-                        <RotateCcw size={16} />
-                      </button>
-                      <button 
-                        onClick={executeQuery}
-                        className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded-lg flex items-center gap-2 text-sm font-bold transition-all shadow-lg shadow-emerald-900/20"
+                        <option value="BPTREE">B+ Tree</option>
+                        <option value="SEQUENTIAL">Sequential File</option>
+                        <option value="HASH">Extendible Hash</option>
+                        <option value="RTREE">R-Tree</option>
+                      </select>
+                      
+                      <button
+                        onClick={createTableFromCSV}
+                        disabled={!csvFile || !tableName || !tableColumns}
+                        className="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-600 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg flex items-center justify-center gap-2 transition-all"
                       >
-                        <Play size={14} fill="currentColor" /> EJECUTAR
+                        <Download size={16} />
+                        Crear Tabla desde CSV
                       </button>
                     </div>
                   </div>
-                  <textarea 
-                    spellCheck="false"
-                    className="w-full h-40 bg-[#1e293b] p-4 font-mono text-sm text-indigo-300 outline-none resize-none"
-                    value={sqlQuery}
-                    onChange={(e) => setSqlQuery(e.target.value)}
-                  />
-                  <div className="px-4 py-2 bg-slate-800/30 border-t border-slate-700 flex gap-4 overflow-x-auto whitespace-nowrap scrollbar-hide">
-                    <span className="text-[10px] text-slate-500 font-bold self-center">ATAJOS:</span>
-                    <button 
-                      onClick={() => setSqlQuery('SELECT * FROM users')}
-                      className="text-[10px] bg-slate-700 hover:bg-indigo-600 text-slate-300 hover:text-white px-2 py-1 rounded transition-colors"
-                    >
-                      SELECT ALL USERS
-                    </button>
-                    <button 
-                      onClick={() => setSqlQuery('SELECT users.name, roles.role_name \nFROM users \nJOIN roles ON users.role_id = roles.id')}
-                      className="text-[10px] bg-slate-700 hover:bg-indigo-600 text-slate-300 hover:text-white px-2 py-1 rounded transition-colors"
-                    >
-                      JOIN USERS + ROLES
-                    </button>
-                    <button 
-                      onClick={() => setSqlQuery('SELECT * FROM users WHERE status = \'Activo\'')}
-                      className="text-[10px] bg-slate-700 hover:bg-indigo-600 text-slate-300 hover:text-white px-2 py-1 rounded transition-colors"
-                    >
-                      FILTER ACTIVE
-                    </button>
-                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="animate-in fade-in duration-300">
+                <span className="text-xs font-bold text-slate-400 flex items-center gap-2">
+                  <Terminal size={14} /> SQL QUERY EDITOR
+                </span>
+                <div className="flex gap-2">
+                  <button 
+                    onClick={() => setSqlQuery('')}
+                    className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
+                    title="Limpiar"
+                  >
+                    <RotateCcw size={16} />
+                  </button>
+                  <button 
+                    onClick={executeQuery}
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded-lg flex items-center gap-2 text-sm font-bold transition-all shadow-lg shadow-emerald-900/20"
+                  >
+                    <Play size={14} fill="currentColor" /> EJECUTAR
+                  </button>
+                </div>
+                <textarea 
+                  spellCheck="false"
+                  className="w-full h-40 bg-[#1e293b] p-4 font-mono text-sm text-indigo-300 outline-none resize-none"
+                  value={sqlQuery}
+                  onChange={(e) => setSqlQuery(e.target.value)}
+                />
+                <div className="px-4 py-2 bg-slate-800/30 border-t border-slate-700 flex gap-4 overflow-x-auto whitespace-nowrap scrollbar-hide">
+                  <span className="text-[10px] text-slate-500 font-bold self-center">ATAJOS:</span>
+                  <button 
+                    onClick={() => setSqlQuery('SELECT * FROM users')}
+                    className="text-[10px] bg-slate-700 hover:bg-indigo-600 text-slate-300 hover:text-white px-2 py-1 rounded transition-colors"
+                  >
+                    SELECT ALL USERS
+                  </button>
+                  <button 
+                    onClick={() => setSqlQuery('SELECT users.name, roles.role_name \nFROM users \nJOIN roles ON users.role_id = roles.id')}
+                    className="text-[10px] bg-slate-700 hover:bg-indigo-600 text-slate-300 hover:text-white px-2 py-1 rounded transition-colors"
+                  >
+                    JOIN USERS + ROLES
+                  </button>
+                  <button 
+                    onClick={() => setSqlQuery('SELECT * FROM users WHERE status = \'Activo\'')}
+                    className="text-[10px] bg-slate-700 hover:bg-indigo-600 text-slate-300 hover:text-white px-2 py-1 rounded transition-colors"
+                  >
+                    FILTER ACTIVE
+                  </button>
                 </div>
 
                 {/* Panel de Resultados */}
