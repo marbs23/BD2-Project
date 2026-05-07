@@ -41,7 +41,10 @@ def main():
             host=host,
             port=port,
             reload=reload,
-            log_level="info"
+            log_level="info",
+            reload_dirs=["./"] if reload else [],
+            reload_includes=["*.py"],
+            reload_excludes=["frontend/*", "node_modules/*", "*.log", ".git/*"]
         )
     except KeyboardInterrupt:
         print("\n👋 Servidor detenido por el usuario")

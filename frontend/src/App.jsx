@@ -178,6 +178,7 @@ const App = () => {
         acc[col.name] = col.type;
         return acc;
       }, {})));
+      formData.append('file', csvFile);  // Enviar el archivo real
       formData.append('file_path', csvFile.name);
       formData.append('database_path', '.');
 

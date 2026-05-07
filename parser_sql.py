@@ -145,13 +145,18 @@ class Parser:
         raise SyntaxError(f"[Parser] sentencia desconocida: '{self.current.valor}'")
 
     def _select(self):
-        self._expect(TipoToken.STAR,"después de SELECT debe ir *")
-        self._expect(TipoToken.FROM,"después de * debe ir FROM")
+        # Permitir tanto * como nombre de columna
+        if self._match(TipoToken.STAR):
+            columna = "*"
+        else:
+            columna = self._expect(TipoToken.IDENT,"después de SELECT debe ir * o nombre de columna").valor
+        
+        self._expect(TipoToken.FROM,f"después de {columna} debe ir FROM")
         tabla=self._expect(TipoToken.IDENT,"nombre de tabla").valor
         self._expect(TipoToken.WHERE,"debe ir WHERE")
-        return self._condicion(tabla)
+        return self._condicion(tabla, columna)
 
-    def _condicion(self, tabla):
+    def _condicion(self, tabla, select_columna="*"):
         col=self._expect(TipoToken.IDENT,"nombre de columna").valor
         if self._match(TipoToken.EQ):
             return NodoSelectPuntual(tabla=tabla,columna=col,valor=self._valor())

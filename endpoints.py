@@ -324,6 +324,7 @@ async def create_table(request: CreateTableRequest):
 @app.post("/api/create-table-from-file")
 async def create_table_from_file(table_name: str = Form(...), 
                            columns: str = Form(...), 
+                           file: UploadFile = File(...),
                            file_path: str = Form(...),
                            database_path: str = Form(default=".")):
     """
@@ -343,12 +344,18 @@ async def create_table_from_file(table_name: str = Form(...),
         import json
         columns_dict = json.loads(columns)
         
+        # Guardar el archivo CSV temporalmente
+        temp_file_path = f"temp_{file_path}"
+        with open(temp_file_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+        
         # Construir consulta CREATE TABLE FROM FILE
         columns_def = []
         for col_name, col_type in columns_dict.items():
             columns_def.append(f"{col_name} {col_type}")
         
-        create_sql = f"CREATE TABLE {table_name} ({', '.join(columns_def)}) FROM FILE \"{file_path}\";"
+        create_sql = f"CREATE TABLE {table_name} ({', '.join(columns_def)}) FROM FILE \"{temp_file_path}\";"
         
         # Ejecutar la consulta
         ejecutor = get_ejecutor(database_path)
@@ -362,6 +369,13 @@ async def create_table_from_file(table_name: str = Form(...),
             if r.ok and r.afectados > 0:
                 total_records += r.afectados
         
+        # Limpiar archivo temporal
+        try:
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+        except:
+            pass
+        
         return {
             "success": success,
             "message": f"Tabla '{table_name}' {'creada y cargada exitosamente' if success else 'falló al crearse'}",
@@ -371,6 +385,12 @@ async def create_table_from_file(table_name: str = Form(...),
         }
         
     except Exception as e:
+        # Limpiar archivo temporal en caso de error
+        try:
+            if 'temp_file_path' in locals() and os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+        except:
+            pass
         return JSONResponse(
             status_code=500,
             content={

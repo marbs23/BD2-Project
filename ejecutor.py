@@ -137,6 +137,93 @@ class Ejecutor:
         return r
 
     # ── CREATE ──────────────────────────────────────────────────────────
+    def crear_tabla_desde_archivo(self, table_name: str, columns: Dict[str, str], file_path: str) -> ResultadoEjecucion:
+        """
+        Crea una tabla y carga datos desde un archivo CSV
+        
+        Args:
+            table_name: Nombre de la tabla
+            columns: Diccionario de columnas {nombre: tipo}
+            file_path: Ruta al archivo CSV
+            
+        Returns:
+            ResultadoEjecucion con el resultado de la operación
+        """
+        r = ResultadoEjecucion("CREATE TABLE FROM FILE", table_name)
+        t0 = time.time()
+        
+        try:
+            # Determinar la técnica de indexación (usar primera columna como clave por defecto)
+            first_col = list(columns.keys())[0]
+            tecnica = "BPTREE"  # Por defecto
+            col_clave = first_col
+            
+            if tecnica not in TECNICAS_VALIDAS:
+                r.ok = False
+                r.mensaje = f"Técnica '{tecnica}' no reconocida. Usa: {TECNICAS_VALIDAS}"
+                return r
+            
+            disponibles = {"BPTREE": BPTREE_OK, "SEQUENTIAL": SEQFILE_OK,
+                          "HASH": HASH_OK, "RTREE": RTREE_OK}
+            if not disponibles[tecnica]:
+                r.ok = False
+                r.mensaje = f"Módulo {tecnica} no disponible"
+                return r
+            
+            base = os.path.join(self.directorio, table_name)
+            
+            # Para from_csv(), no creamos el índice aquí, lo crea el método from_csv()
+            indice = None
+            
+            # Cargar datos usando el método from_csv() de cada índice
+            registros_cargados = 0
+            
+            if tecnica == "BPTREE":
+                # Usar el método from_csv() del BPlusTree
+                from bplustree import BPlusTree
+                indice = BPlusTree.from_csv(base, file_path)
+                root_page, total_pages, height, total_records = indice._read_header()
+                registros_cargados = total_records
+                
+            elif tecnica == "SEQUENTIAL":
+                # Usar el método from_csv() del SequentialFile
+                from sequential_file import SequentialFile
+                indice = SequentialFile.from_csv(base, file_path)
+                registros_cargados = len(indice.records) if hasattr(indice, 'records') else 0
+                
+            elif tecnica == "HASH":
+                # Usar el método from_csv() del ExtendibleHash
+                from extendible_hash import ExtendibleHash
+                # El ExtendibleHash necesita paths separados para datos e índice
+                data_path = base + "_data"
+                index_path = base + "_index"
+                indice = ExtendibleHash.from_csv(data_path, index_path, file_path)
+                registros_cargados = getattr(indice, 'record_count', 0)
+                
+            elif tecnica == "RTREE":
+                # Usar el método bulk_load_from_csv() del RTree
+                from rtree.rtree_index import RTreeIndex
+                # Para RTree, asumir que las primeras dos columnas son coordenadas
+                coords = list(columns.keys())[:2]
+                lon_col, lat_col = coords[0], coords[1]
+                indice = RTreeIndex(base)
+                registros_cargados = indice.bulk_load_from_csv(file_path, lon_col, lat_col)
+            
+            # Actualizar estadísticas
+            r.ok = True
+            r.afectados = registros_cargados
+            r.mensaje = f"Tabla '{table_name}' creada y cargados {registros_cargados} registros desde '{file_path}'"
+            
+        except FileNotFoundError:
+            r.ok = False
+            r.mensaje = f"Archivo no encontrado: {file_path}"
+        except Exception as e:
+            r.ok = False
+            r.mensaje = f"Error creando tabla desde archivo: {str(e)}"
+        
+        r.tiempo_ms = (time.time() - t0) * 1000
+        return r
+    
     def _crear_tabla(self, nodo: NodoCreateTable) -> ResultadoEjecucion:
         r = ResultadoEjecucion("CREATE TABLE", nodo.tabla)
         t0 = time.time()
