@@ -4,6 +4,7 @@ import struct
 import time
 import csv
 import os
+import math
 
 # correcciones hechas =D
 
@@ -49,10 +50,10 @@ class Record:
 
 class SeqFile:
     # 1) constructor
-    def __init__(self, filename: str, k_desorted: int = 100):
+    def __init__(self, filename: str, k_desorted):
         self.filename = filename
         self.aux_filename = filename.replace(".bin", "_aux.bin")
-        self.k_desorted = k_desorted
+        self.k_desorted = k_desorted 
         self.read_count = 0
         self.write_count = 0
         if not os.path.exists(self.filename): # si el archivo no existe
@@ -80,8 +81,96 @@ class SeqFile:
     #    ejemplo: si next_file es 1 y next_pos es 3, el siguiente registro es
     #    el que está en el índice 3 del archivo auxiliar
     @classmethod
-    def from_csv(cls, filename: str, csv_path: str, k_desorted: int = 100, limite: int = 2000000):
-        records = []
+    def from_csv(cls, filename: str, csv_path: str, k_desorted: int = None, limite: int = 2_000_000, chunk_size: int = 50_000):
+
+        # fase 1: crear chunks ordenados en disco
+        # un chunk es un lote de chunk_size registros que sí cabe en ram
+        chunk_files = []
+        chunk = []
+        total_leidos = 0
+        with open(csv_path, newline="", encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if total_leidos >= limite:
+                    break
+                try:
+                    b_id = int(row["book_key"])
+                    title = row["title"]
+                    author = row["author"]
+                    pages = int(row["pages"]) if row["pages"] else 0
+                    rating = float(row["average_rating"]) if row["average_rating"] else 0.0
+                    year = int(row["published_date"]) if row["published_date"] else 0
+                    chunk.append(Record(id=b_id, title=title, author=author, pages=pages, rating=rating, year=year))
+                    total_leidos += 1
+                except (ValueError, KeyError):
+                    continue # saltamos filas mal formateadas
+                # cuando el buffer llega a chunk_size, lo volcamos a disco y lo limpiamos
+                if len(chunk) >= chunk_size:
+                    chunk_files.append(_flush_chunk(filename, chunk, len(chunk_files)))
+                    chunk.clear()  # liberamos la ram del lote anterior
+        # si quedaron registros sueltos que no completaron un chunk, los volcamos también
+        if chunk:
+            chunk_files.append(_flush_chunk(filename, chunk, len(chunk_files)))
+            chunk.clear()
+
+        # calcular k_desorted dinámicamente como log(n) donde n es el número de registros
+        if k_desorted is None:
+            k_desorted = int(math.log(total_leidos)) if total_leidos > 0 else 1
+            print(f"k_desorted calculado dinámicamente: log({total_leidos}) = {k_desorted}")
+
+        # fase 2: merge n-way con heapq
+        # abrimos todos los temporales; el heap solo guarda un registro por chunk en ram
+        handles = [open(p, "rb") for p in chunk_files]
+        # inicializamos el heap con el primer registro de cada chunk
+        heap = []
+        for i, h in enumerate(handles):
+            rec = _next_from(h)
+            if rec is not None:
+                # la tupla es (id, i, rec): heapq compara por id primero (orden ascendente)
+                heapq.heappush(heap, (rec.id, i, rec))
+        # creamos el objeto seqfile y preparamos el archivo principal limpio
+        obj = cls(filename, k_desorted)
+        obj.file.seek(0)
+        obj.file.truncate()
+        obj.aux_file.seek(0)
+        obj.aux_file.truncate()
+        # escribimos un header temporal vacío para reservar su espacio
+        obj.file.write(struct.pack(HEADER_FORMAT, 0, 0, -1, -1))
+        total_escritos = 0
+        prev_rec = None # guardamos el registro anterior para actualizar su puntero
+        while heap:
+            # extraemos el registro con el id más pequeño de todos los chunks
+            _, chunk_idx, rec = heapq.heappop(heap)
+            if prev_rec is not None:
+                # ahora sabemos que el siguiente de prev_rec es rec, que quedará en
+                # la posición total_escritos + 1 (la siguiente a la que vamos a ocupar ahora)
+                prev_rec.next_file = 0
+                prev_rec.next_pos = total_escritos + 1
+                obj.file.write(obj._pack_record(prev_rec))
+                total_escritos += 1
+            # cargamos el siguiente registro del chunk que acaba de "ganar"
+            next_rec = _next_from(handles[chunk_idx])
+            if next_rec is not None:
+                heapq.heappush(heap, (next_rec.id, chunk_idx, next_rec))
+            # guardamos rec como prev_rec; lo escribiremos en la siguiente iteración
+            # cuando ya sepamos a quién apunta
+            prev_rec = rec
+        # el último registro de la cadena apunta a -1 (fin de cadena)
+        if prev_rec is not None:
+            prev_rec.next_file = -1
+            prev_rec.next_pos = -1
+            obj.file.write(obj._pack_record(prev_rec))
+            total_escritos += 1
+        # cerramos y borramos todos los archivos temporales
+        for h in handles:
+            h.close()
+        for p in chunk_files:
+            os.remove(p)
+        # contamos páginas escritas (el merge escribe directo sin pasar por _write_record)
+        obj.write_count += math.ceil(total_escritos / RECORDS_PER_PAGE)
+        obj._write_header(total_escritos, 0, 0, 0)
+        return obj
+
         # 1. leer los datos del csv
         with open(csv_path, newline="", encoding='utf-8') as f:
             # usamos dictreader para reconocer las columnas por su nombre en la primera fila
@@ -108,7 +197,14 @@ class SeqFile:
         # 2. ordenar por id
         # el sequential file requiere que el archivo principal nazca ordenado fisicamente
         records.sort(key=lambda record: record.id)
-        # 3. crear el archivo y limpiar
+        
+        # 3. calcular k_desorted dinámicamente como log(n) donde n es el número de registros
+        n = len(records)
+        if k_desorted is None:
+            k_desorted = int(math.log(n)) if n > 0 else 1
+            print(f"k_desorted calculado dinámicamente: log({n}) = {k_desorted}")
+        
+        # 4. crear el archivo y limpiar
         obj = cls(filename, k_desorted)
         # limpiar archivo principal
         obj.file.seek(0)
@@ -120,7 +216,7 @@ class SeqFile:
         obj.aux_file.truncate()
         obj.file.seek(HEADER_SIZE) # nos ubicamos en la cabecera
         obj.file.truncate() # borramos lo de abajo de donde estamos
-        # 4. empaquetamos y escribimos los registros uno tras otro
+        # 5. empaquetamos y escribimos los registros uno tras otro
         total_records = len(records)
         for i in range(total_records):
             # si no es el último, el puntero apunta al siguiente registro físico
@@ -135,7 +231,7 @@ class SeqFile:
             obj.file.write(obj._pack_record(records[i]))
             # sumamos una escritura por cada registro en la carga inicial (o podrias optimizarlo por paginas dps)
             obj.write_count += 1
-        # 5. actualizar el header
+        # 6. actualizar el header
         # parametros: cant_prin, cant_aux, prim_arc, prim_pos
         # como es la primera carga, el primer registro lógico es el 0 del archivo principal
         # reiniciamos los auxiliares a 0 porque acabamos de reconstruir el principal
