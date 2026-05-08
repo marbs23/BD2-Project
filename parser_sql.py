@@ -6,7 +6,7 @@ class TipoToken(Enum):
     SELECT=auto(); FROM=auto(); WHERE=auto(); INSERT=auto(); INTO=auto()
     VALUES=auto(); DELETE=auto(); CREATE=auto(); TABLE=auto(); INDEX=auto()
     BETWEEN=auto(); AND=auto(); IN=auto(); POINT=auto(); RADIUS=auto()
-    FILE=auto(); K=auto()
+    FILE=auto(); K=auto(); LIMIT=auto()
     STAR=auto(); EQ=auto(); COMMA=auto(); LPAREN=auto(); RPAREN=auto(); SEMICOL=auto()
     NUMBER=auto(); STRING=auto(); IDENT=auto()
     END=auto(); ERR=auto()
@@ -23,7 +23,7 @@ KEYWORDS = {
     "delete":TipoToken.DELETE,"create":TipoToken.CREATE,"table":TipoToken.TABLE,
     "index":TipoToken.INDEX,"between":TipoToken.BETWEEN,"and":TipoToken.AND,
     "in":TipoToken.IN,"point":TipoToken.POINT,"radius":TipoToken.RADIUS,
-    "file":TipoToken.FILE,"k":TipoToken.K,
+    "file":TipoToken.FILE,"k":TipoToken.K,"limit":TipoToken.LIMIT,
 }
 
 class Scanner:
@@ -92,6 +92,10 @@ class NodoSelectRango:
     tabla:str; columna:str; inicio:Any; fin:Any
 
 @dataclass
+class NodoSelectTodos:
+    tabla:str; limite:Optional[int]=None
+
+@dataclass
 class NodoSelectRadio:
     tabla:str; columna:str; x:float; y:float; radio:float
 
@@ -153,8 +157,22 @@ class Parser:
         
         self._expect(TipoToken.FROM,f"después de {columna} debe ir FROM")
         tabla=self._expect(TipoToken.IDENT,"nombre de tabla").valor
+
+        # SELECT * FROM tabla  (sin WHERE, con LIMIT opcional)
+        if not self._check(TipoToken.WHERE):
+            limite = None
+            if self._match(TipoToken.LIMIT):
+                limite = int(self._expect(TipoToken.NUMBER,"número después de LIMIT").valor)
+            return NodoSelectTodos(tabla=tabla, limite=limite)
+
         self._expect(TipoToken.WHERE,"debe ir WHERE")
-        return self._condicion(tabla, columna)
+        nodo = self._condicion(tabla, columna)
+        # LIMIT opcional al final de cualquier SELECT
+        if self._match(TipoToken.LIMIT):
+            limite = int(self._expect(TipoToken.NUMBER,"número después de LIMIT").valor)
+            if isinstance(nodo, NodoSelectTodos):
+                nodo.limite = limite
+        return nodo
 
     def _condicion(self, tabla, select_columna="*"):
         col=self._expect(TipoToken.IDENT,"nombre de columna").valor

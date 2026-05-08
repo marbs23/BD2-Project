@@ -16,6 +16,205 @@ import {
 } from 'lucide-react';
 
 
+// ── Componente de visualización R-Tree ────────────────────────────────────────
+const RTreeViewer = ({ rtreeQuery, rtreePoints, rtreeTables, onLoadPoints }) => {
+  const canvasRef = React.useRef(null);
+  const [selectedTable, setSelectedTable] = React.useState('');
+
+  // Todos los puntos a mostrar: los del índice + los resultados de la query
+  const allPoints = rtreePoints;
+  const resultPoints = rtreeQuery?.results || [];
+
+  React.useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width;
+    const H = canvas.height;
+    const PAD = 40;
+
+    ctx.clearRect(0, 0, W, H);
+
+    // Fondo
+    ctx.fillStyle = '#0f172a';
+    ctx.fillRect(0, 0, W, H);
+
+    // Calcular bounding box de todos los puntos
+    const pts = allPoints.length > 0 ? allPoints : (rtreeQuery ? [{ lon: rtreeQuery.lon, lat: rtreeQuery.lat }] : []);
+    if (pts.length === 0 && !rtreeQuery) {
+      ctx.fillStyle = '#475569';
+      ctx.font = '14px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('Sin datos. Ejecuta una consulta R-Tree o carga puntos.', W / 2, H / 2);
+      return;
+    }
+
+    const allLons = pts.map(p => p.lon);
+    const allLats = pts.map(p => p.lat);
+    if (rtreeQuery) { allLons.push(rtreeQuery.lon); allLats.push(rtreeQuery.lat); }
+
+    let minLon = Math.min(...allLons);
+    let maxLon = Math.max(...allLons);
+    let minLat = Math.min(...allLats);
+    let maxLat = Math.max(...allLats);
+
+    // Expandir un poco para que los puntos no queden en el borde
+    const dLon = (maxLon - minLon) * 0.1 || 1;
+    const dLat = (maxLat - minLat) * 0.1 || 1;
+    minLon -= dLon; maxLon += dLon;
+    minLat -= dLat; maxLat += dLat;
+
+    const toX = (lon) => PAD + ((lon - minLon) / (maxLon - minLon)) * (W - 2 * PAD);
+    const toY = (lat) => H - PAD - ((lat - minLat) / (maxLat - minLat)) * (H - 2 * PAD);
+
+    // Grid
+    ctx.strokeStyle = '#1e293b';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 5; i++) {
+      const x = PAD + (i / 5) * (W - 2 * PAD);
+      const y = PAD + (i / 5) * (H - 2 * PAD);
+      ctx.beginPath(); ctx.moveTo(x, PAD); ctx.lineTo(x, H - PAD); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(W - PAD, y); ctx.stroke();
+    }
+
+    // Ejes labels
+    ctx.fillStyle = '#475569';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(minLon.toFixed(2), PAD, H - 10);
+    ctx.fillText(maxLon.toFixed(2), W - PAD, H - 10);
+    ctx.textAlign = 'right';
+    ctx.fillText(minLat.toFixed(2), PAD - 4, H - PAD);
+    ctx.fillText(maxLat.toFixed(2), PAD - 4, PAD + 4);
+
+    // Círculo de radio si hay query RADIUS
+    if (rtreeQuery?.radius != null) {
+      const cx = toX(rtreeQuery.lon);
+      const cy = toY(rtreeQuery.lat);
+      // Radio en unidades de pantalla (aproximado)
+      const rPx = (rtreeQuery.radius / (maxLon - minLon)) * (W - 2 * PAD);
+      ctx.beginPath();
+      ctx.arc(cx, cy, rPx, 0, 2 * Math.PI);
+      ctx.strokeStyle = 'rgba(139,92,246,0.5)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(139,92,246,0.08)';
+      ctx.fill();
+    }
+
+    // Puntos del índice (gris)
+    allPoints.forEach(p => {
+      ctx.beginPath();
+      ctx.arc(toX(p.lon), toY(p.lat), 3, 0, 2 * Math.PI);
+      ctx.fillStyle = '#334155';
+      ctx.fill();
+    });
+
+    // Puntos resultado (verde brillante)
+    resultPoints.forEach(p => {
+      if (p.lon == null) return;
+      ctx.beginPath();
+      ctx.arc(toX(p.lon), toY(p.lat), 5, 0, 2 * Math.PI);
+      ctx.fillStyle = '#10b981';
+      ctx.fill();
+      ctx.strokeStyle = '#34d399';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    });
+
+    // Punto de consulta (rojo)
+    if (rtreeQuery) {
+      const cx = toX(rtreeQuery.lon);
+      const cy = toY(rtreeQuery.lat);
+      ctx.beginPath();
+      ctx.arc(cx, cy, 7, 0, 2 * Math.PI);
+      ctx.fillStyle = '#ef4444';
+      ctx.fill();
+      ctx.strokeStyle = '#fca5a5';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // Cruz
+      ctx.strokeStyle = '#fca5a5';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(cx - 12, cy); ctx.lineTo(cx + 12, cy); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx, cy - 12); ctx.lineTo(cx, cy + 12); ctx.stroke();
+    }
+
+    // Leyenda
+    const legend = [
+      { color: '#334155', label: `Puntos índice (${allPoints.length})` },
+      { color: '#10b981', label: `Resultados (${resultPoints.length})` },
+      { color: '#ef4444', label: 'Punto consulta' },
+    ];
+    legend.forEach((l, i) => {
+      ctx.fillStyle = l.color;
+      ctx.fillRect(W - 160, 12 + i * 18, 10, 10);
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(l.label, W - 146, 21 + i * 18);
+    });
+
+  }, [allPoints, rtreeQuery, resultPoints]);
+
+  return (
+    <div className="animate-in fade-in duration-300 p-4 flex flex-col gap-4">
+      <div className="flex items-center gap-4 flex-wrap">
+        <h3 className="text-sm font-bold text-slate-300 flex items-center gap-2">
+          🗺 Visualización R-Tree
+        </h3>
+        {rtreeTables.length > 0 && (
+          <div className="flex items-center gap-2">
+            <select
+              value={selectedTable}
+              onChange={e => setSelectedTable(e.target.value)}
+              className="px-2 py-1 bg-slate-800 border border-slate-600 rounded text-slate-200 text-xs"
+            >
+              <option value="">-- seleccionar tabla --</option>
+              {rtreeTables.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <button
+              onClick={() => selectedTable && onLoadPoints(selectedTable)}
+              className="px-3 py-1 bg-purple-700 hover:bg-purple-600 text-white text-xs rounded"
+            >
+              Cargar puntos
+            </button>
+          </div>
+        )}
+        {rtreeQuery && (
+          <div className="text-xs text-slate-400 bg-slate-800 px-3 py-1 rounded">
+            Query: ({rtreeQuery.lon}, {rtreeQuery.lat})
+            {rtreeQuery.radius != null && ` RADIUS ${rtreeQuery.radius}`}
+            {rtreeQuery.k != null && ` K=${rtreeQuery.k}`}
+            {' → '}<span className="text-emerald-400">{resultPoints.length} resultados</span>
+          </div>
+        )}
+      </div>
+
+      <canvas
+        ref={canvasRef}
+        width={900}
+        height={500}
+        className="w-full rounded-xl border border-slate-700 bg-[#0f172a]"
+        style={{ maxHeight: '500px' }}
+      />
+
+      <div className="text-xs text-slate-500 text-center">
+        <span className="inline-block w-3 h-3 rounded-full bg-[#334155] mr-1 align-middle" /> Todos los puntos del índice &nbsp;
+        <span className="inline-block w-3 h-3 rounded-full bg-emerald-500 mr-1 align-middle" /> Resultados de la búsqueda &nbsp;
+        <span className="inline-block w-3 h-3 rounded-full bg-red-500 mr-1 align-middle" /> Punto de consulta &nbsp;
+        <span className="inline-block w-3 h-3 rounded-full bg-purple-500/40 border border-purple-400 mr-1 align-middle" /> Radio de búsqueda
+      </div>
+
+      {!rtreeQuery && allPoints.length === 0 && (
+        <div className="text-center text-slate-500 text-sm py-8">
+          Ejecuta una consulta <code className="bg-slate-800 px-1 rounded">SELECT ... WHERE coords IN (POINT(...), RADIUS ...)</code> para ver la visualización aquí automáticamente.
+        </div>
+      )}
+    </div>
+  );
+};
+
 const App = () => {
   const [tables, setTables] = useState({});
 
@@ -31,6 +230,14 @@ const App = () => {
   const [selectedIndexType, setSelectedIndexType] = useState('BPTREE');
   const [concurrencyStats, setConcurrencyStats] = useState(null);
   
+  // Stats de la última consulta ejecutada
+  const [lastQueryStats, setLastQueryStats] = useState(null);
+
+  // Estado para visualización R-Tree
+  const [rtreePoints, setRtreePoints] = useState([]);
+  const [rtreeQuery, setRtreeQuery] = useState(null); // { lon, lat, radius }
+  const [rtreeTables, setRtreeTables] = useState([]);
+
   // Estados para manejo de archivos CSV
   const [csvFile, setCsvFile] = useState(null);
   const [tableName, setTableName] = useState('');
@@ -50,27 +257,48 @@ const App = () => {
     try {
       const response = await fetch('http://localhost:8000/api/execute', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          query: sqlQuery,
-          database_path: "."
-        })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: sqlQuery, database_path: "." })
       });
 
       const result = await response.json();
 
+      // Guardar stats de la última consulta siempre
+      setLastQueryStats({
+        tiempo_ms: result.execution_time_ms ?? 0,
+        reads: result.io_stats?.reads ?? 0,
+        writes: result.io_stats?.writes ?? 0,
+        total_io: result.io_stats?.total_io ?? 0,
+        ok: result.success,
+      });
+
       if (result.success) {
         setQueryResult(result.data || []);
         showNotification(result.message || 'Consulta ejecutada con éxito');
-        // Actualizar estadísticas después de cada consulta
         loadStats();
+
+        // Si la consulta es espacial, extraer punto y radio para visualizar
+        const spatialMatch = sqlQuery.match(
+          /POINT\s*\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)\s*,\s*RADIUS\s+([\d.]+)/i
+        );
+        const knnMatch = sqlQuery.match(
+          /POINT\s*\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)\s*,\s*K\s+(\d+)/i
+        );
+        if (spatialMatch || knnMatch) {
+          const m = spatialMatch || knnMatch;
+          setRtreeQuery({
+            lon: parseFloat(m[1]),
+            lat: parseFloat(m[2]),
+            radius: spatialMatch ? parseFloat(m[3]) : null,
+            k: knnMatch ? parseInt(m[3]) : null,
+            results: result.data || [],
+          });
+          setActiveTab('rtree');
+        }
       } else {
         setQueryError(result.error || result.message || 'Error en la consulta');
         showNotification('Error en la consulta', 'error');
       }
-
     } catch (err) {
       setQueryError('Error de conexión con el backend: ' + err.message);
       showNotification('No se pudo conectar con el backend', 'error');
@@ -84,13 +312,29 @@ const App = () => {
       const data = await response.json();
       if (data.success) {
         const tablesMap = {};
+        const rtree = [];
         data.tables.forEach(table => {
           tablesMap[table.name] = table;
+          if (table.index_type === 'RTREE' || table.name.includes('rtree')) {
+            rtree.push(table.name);
+          }
         });
         setTables(tablesMap);
+        setRtreeTables(rtree);
       }
     } catch (err) {
       console.error('Error cargando tablas:', err);
+    }
+  };
+
+  // Cargar todos los puntos de una tabla R-Tree para visualización
+  const loadRtreePoints = async (table) => {
+    try {
+      const response = await fetch(`http://localhost:8000/api/rtree-points/${table}`);
+      const data = await response.json();
+      if (data.success) setRtreePoints(data.points || []);
+    } catch (err) {
+      console.error('Error cargando puntos R-Tree:', err);
     }
   };
 
@@ -468,6 +712,12 @@ const App = () => {
                 >
                   Subir CSV
                 </button>
+                <button 
+                  onClick={() => setActiveTab('rtree')}
+                  className={`text-sm font-medium pb-5 pt-5 border-b-2 transition-all ${activeTab === 'rtree' ? 'border-purple-500 text-white' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
+                >
+                  🗺 R-Tree
+                </button>
               </nav>
             </div>
             
@@ -536,6 +786,29 @@ const App = () => {
                     )}
                   </div>
                 </div>
+
+                {/* Panel stats última consulta */}
+                {lastQueryStats && (
+                  <div className={`flex gap-4 text-xs px-4 py-2 rounded-lg border ${lastQueryStats.ok ? 'bg-emerald-900/10 border-emerald-800/40' : 'bg-red-900/10 border-red-800/40'}`}>
+                    <span className="text-slate-400 font-bold self-center">ÚLTIMA CONSULTA:</span>
+                    <div className="bg-slate-800 rounded px-3 py-1.5">
+                      <p className="text-slate-500">Tiempo</p>
+                      <p className="font-mono font-bold text-yellow-400">{lastQueryStats.tiempo_ms.toFixed(2)} ms</p>
+                    </div>
+                    <div className="bg-slate-800 rounded px-3 py-1.5">
+                      <p className="text-slate-500">Lecturas disco</p>
+                      <p className="font-mono font-bold text-blue-400">{lastQueryStats.reads}</p>
+                    </div>
+                    <div className="bg-slate-800 rounded px-3 py-1.5">
+                      <p className="text-slate-500">Escrituras disco</p>
+                      <p className="font-mono font-bold text-orange-400">{lastQueryStats.writes}</p>
+                    </div>
+                    <div className="bg-slate-800 rounded px-3 py-1.5">
+                      <p className="text-slate-500">Total I/O</p>
+                      <p className="font-mono font-bold text-emerald-400">{lastQueryStats.total_io}</p>
+                    </div>
+                  </div>
+                )}
 
                 {/* Panel de Resultados */}
                 <div className="flex-1 bg-[#020617] rounded-xl border border-slate-700 overflow-hidden flex flex-col min-h-[300px]">
@@ -659,6 +932,13 @@ const App = () => {
                   </div>
                 </div>
               </div>
+            ) : activeTab === 'rtree' ? (
+              <RTreeViewer
+                rtreeQuery={rtreeQuery}
+                rtreePoints={rtreePoints}
+                rtreeTables={rtreeTables}
+                onLoadPoints={loadRtreePoints}
+              />
             ):null}
           </section>
 

@@ -150,6 +150,8 @@ async def execute_sql(request: SQLQuery):
         # Convertir resultados a formato JSON
         response_data = []
         total_io = 0
+        total_reads = 0
+        total_writes = 0
         success_count = 0
         
         for resultado in resultados:
@@ -158,16 +160,24 @@ async def execute_sql(request: SQLQuery):
                 
                 # Convertir registros a diccionarios
                 registros_data = []
+                # Campos internos de indexación que no deben mostrarse al usuario
+                _campos_internos = {"next_file", "next_pos"}
                 for registro in resultado.registros:
                     if hasattr(registro, '__dict__'):
-                        registros_data.append(registro.__dict__)
+                        d = {k: v for k, v in registro.__dict__.items()
+                             if k not in _campos_internos}
+                        registros_data.append(d)
                     elif hasattr(registro, '_asdict'):
-                        registros_data.append(registro._asdict())
+                        d = {k: v for k, v in registro._asdict().items()
+                             if k not in _campos_internos}
+                        registros_data.append(d)
                     else:
                         registros_data.append({"data": str(registro)})
                 
                 response_data.extend(registros_data)
                 total_io += resultado.total_io
+                total_reads += resultado.reads
+                total_writes += resultado.writes
         
         # Determinar si la operación fue exitosa
         overall_success = success_count == len(resultados)
@@ -177,7 +187,7 @@ async def execute_sql(request: SQLQuery):
             data=response_data if response_data else None,
             message=f"Se ejecutaron {len(resultados)} sentencias. {success_count} exitosas.",
             execution_time_ms=execution_time_ms,
-            io_stats={"total_io": total_io},
+            io_stats={"total_io": total_io, "reads": total_reads, "writes": total_writes},
             error=None if overall_success else f"Algunas sentencias fallaron: {len(resultados) - success_count}"
         )
         
@@ -895,6 +905,136 @@ async def cleanup_database(database_path: str = "."):
                 "error": str(e)
             }
         )
+
+class SpatialQueryRequest(BaseModel):
+    table: str
+    lon: float
+    lat: float
+    radius: Optional[float] = None
+    k: Optional[int] = None
+    database_path: Optional[str] = "."
+
+
+@app.post("/api/spatial-search")
+async def spatial_search(request: SpatialQueryRequest):
+    """
+    Ejecuta una búsqueda espacial (RADIUS o KNN) y devuelve los puntos
+    con coordenadas para visualización en el plano.
+    """
+    try:
+        ejecutor = get_ejecutor(request.database_path)
+
+        if request.table not in ejecutor._catalogo:
+            return JSONResponse(status_code=404, content={
+                "success": False,
+                "message": f"Tabla '{request.table}' no existe"
+            })
+
+        info = ejecutor._catalogo[request.table]
+        if info["tecnica"] != "RTREE":
+            return JSONResponse(status_code=400, content={
+                "success": False,
+                "message": "La tabla no usa índice RTREE"
+            })
+
+        indice = info["indice"]
+        t0 = datetime.now()
+
+        if request.radius is not None:
+            result = indice.range_search(request.lon, request.lat, request.radius)
+        elif request.k is not None:
+            result = indice.knn(request.lon, request.lat, request.k)
+        else:
+            return JSONResponse(status_code=400, content={
+                "success": False,
+                "message": "Debes especificar radius o k"
+            })
+
+        elapsed = (datetime.now() - t0).total_seconds() * 1000
+
+        # Convertir TIDs a puntos con coordenadas aproximadas desde los MBRs visitados
+        tids = [{"page_id": t.page_id, "slot_id": t.slot_id} for t in result.tids]
+        visited = [{"min_lon": m[0], "max_lon": m[1], "min_lat": m[2], "max_lat": m[3]}
+                   for m in result.visited_mbrs]
+
+        return {
+            "success": True,
+            "query_point": {"lon": request.lon, "lat": request.lat},
+            "query_radius": request.radius,
+            "results_count": len(tids),
+            "tids": tids,
+            "visited_mbrs": visited,
+            "io_reads": result.io_reads,
+            "io_writes": result.io_writes,
+            "execution_time_ms": elapsed
+        }
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={
+            "success": False,
+            "message": "Error en búsqueda espacial",
+            "error": str(e)
+        })
+
+
+@app.get("/api/rtree-points/{table}")
+async def get_rtree_points(table: str, database_path: str = "."):
+    """
+    Devuelve todos los puntos almacenados en un índice R-Tree para visualización.
+    Recorre todas las hojas del árbol y extrae las coordenadas de los MBRs.
+    """
+    try:
+        ejecutor = get_ejecutor(database_path)
+
+        if table not in ejecutor._catalogo:
+            return JSONResponse(status_code=404, content={
+                "success": False,
+                "message": f"Tabla '{table}' no existe"
+            })
+
+        info = ejecutor._catalogo[table]
+        if info["tecnica"] != "RTREE":
+            return JSONResponse(status_code=400, content={
+                "success": False,
+                "message": "La tabla no usa índice RTREE"
+            })
+
+        indice = info["indice"]
+        points = []
+
+        # Recorrer el árbol para extraer puntos de las hojas
+        def collect_points(pid: int):
+            node = indice._read_node(pid)
+            if node.is_leaf:
+                for e in node.entries:
+                    mbr = e["mbr"]
+                    # Para puntos, min == max en ambas dimensiones
+                    points.append({
+                        "lon": (mbr.min_lon + mbr.max_lon) / 2,
+                        "lat": (mbr.min_lat + mbr.max_lat) / 2,
+                        "page_id": e.get("tid_page", 0),
+                        "slot_id": e.get("tid_slot", 0)
+                    })
+            else:
+                for e in node.entries:
+                    collect_points(e["child_pid"])
+
+        collect_points(indice._root_pid())
+
+        return {
+            "success": True,
+            "table": table,
+            "points": points,
+            "total": len(points)
+        }
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={
+            "success": False,
+            "message": "Error obteniendo puntos del R-Tree",
+            "error": str(e)
+        })
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):

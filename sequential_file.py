@@ -5,6 +5,7 @@ import time
 import csv
 import os
 import math
+import heapq
 
 # correcciones hechas =D
 
@@ -47,7 +48,36 @@ class Record:
     year: int
     next_file: int = -1
     next_pos: int = -1
+def _flush_chunk(filename: str, buf: list, idx: int) -> str:
+    # ordena el buffer en ram y lo escribe en un .bin temporal
+    # devuelve el path del archivo temporal creado
+    buf.sort(key=lambda r: r.id)
+    tmp_path = filename + f".chunk_{idx}.tmp"
+    with open(tmp_path, "wb") as tmp:
+        for r in buf:
+            # punteros en -1 porque todavía no sabemos el orden final
+            r.next_file = -1
+            r.next_pos = -1
+            tmp.write(struct.pack(RECORD_FORMAT,
+                r.id,
+                r.title.encode('utf-8')[:100].ljust(100, b'\x00'),
+                r.author.encode('utf-8')[:40].ljust(40, b'\x00'),
+                r.pages, r.rating, r.year,
+                r.next_file, r.next_pos))
+    return tmp_path
 
+def _next_from(handle) -> Optional[Record]:
+    # lee el siguiente registro del archivo temporal dado
+    # devuelve None si llegó al final
+    raw = handle.read(RECORD_SIZE)
+    if len(raw) < RECORD_SIZE:
+        return None
+    vals = struct.unpack(RECORD_FORMAT, raw)
+    return Record(id=vals[0],
+                  title=vals[1].decode('utf-8', errors='ignore').rstrip('\x00').strip(),
+                  author=vals[2].decode('utf-8', errors='ignore').rstrip('\x00').strip(),
+                  pages=vals[3], rating=vals[4], year=vals[5],
+                  next_file=vals[6], next_pos=vals[7])
 class SeqFile:
     # 1) constructor
     def __init__(self, filename: str, k_desorted):
@@ -169,73 +199,6 @@ class SeqFile:
         # contamos páginas escritas (el merge escribe directo sin pasar por _write_record)
         obj.write_count += math.ceil(total_escritos / RECORDS_PER_PAGE)
         obj._write_header(total_escritos, 0, 0, 0)
-        return obj
-
-        # 1. leer los datos del csv
-        with open(csv_path, newline="", encoding='utf-8') as f:
-            # usamos dictreader para reconocer las columnas por su nombre en la primera fila
-            reader = csv.DictReader(f)
-            for i, row in enumerate(reader):
-                if i >= limite:
-                    break
-                try:
-                    # extraemos el id (book_key)
-                    b_id = int(row["book_key"])
-                    # extraemos el titulo y autor (strings)
-                    title = row["title"]
-                    author = row["author"]
-                    # para los campos numericos, validamos si estan vacios para no romper el programa
-                    # si esta vacio, le asignamos 0 o 0.0 segun corresponda
-                    pages = int(row["pages"]) if row["pages"] else 0
-                    rating = float(row["average_rating"]) if row["average_rating"] else 0.0
-                    year = int(row["published_date"]) if row["published_date"] else 0
-                    # creamos el objeto record con todos los campos nuevos del libro
-                    records.append(Record(id=b_id, title=title, author=author,pages=pages, rating=rating, year=year))
-                except (ValueError, KeyError):
-                    # si una linea viene mal formateada o con ids no validos, la saltamos
-                    continue
-        # 2. ordenar por id
-        # el sequential file requiere que el archivo principal nazca ordenado fisicamente
-        records.sort(key=lambda record: record.id)
-        
-        # 3. calcular k_desorted dinámicamente como log(n) donde n es el número de registros
-        n = len(records)
-        if k_desorted is None:
-            k_desorted = int(math.log(n)) if n > 0 else 1
-            print(f"k_desorted calculado dinámicamente: log({n}) = {k_desorted}")
-        
-        # 4. crear el archivo y limpiar
-        obj = cls(filename, k_desorted)
-        # limpiar archivo principal
-        obj.file.seek(0)
-        obj.file.truncate()
-        # escribir un header vacío temporal para que no falle el tamaño
-        obj.file.write(struct.pack(HEADER_FORMAT, 0, 0, -1, -1))
-        # LIMPIAR ARCHIVO AUXILIAR (esto es lo que te está fallando)
-        obj.aux_file.seek(0)
-        obj.aux_file.truncate()
-        obj.file.seek(HEADER_SIZE) # nos ubicamos en la cabecera
-        obj.file.truncate() # borramos lo de abajo de donde estamos
-        # 5. empaquetamos y escribimos los registros uno tras otro
-        total_records = len(records)
-        for i in range(total_records):
-            # si no es el último, el puntero apunta al siguiente registro físico
-            if i < total_records - 1:
-                records[i].next_file = 0 # 0 significa archivo principal
-                records[i].next_pos = i + 1
-            else:
-                # el último registro de la cadena apunta a -1 (final)
-                records[i].next_file = -1
-                records[i].next_pos = -1
-            # escribir al disco (usando nuestro pack_record que ahora maneja todos los campos del libro)
-            obj.file.write(obj._pack_record(records[i]))
-            # sumamos una escritura por cada registro en la carga inicial (o podrias optimizarlo por paginas dps)
-            obj.write_count += 1
-        # 6. actualizar el header
-        # parametros: cant_prin, cant_aux, prim_arc, prim_pos
-        # como es la primera carga, el primer registro lógico es el 0 del archivo principal
-        # reiniciamos los auxiliares a 0 porque acabamos de reconstruir el principal
-        obj._write_header(total_records, 0, 0, 0)
         return obj
 
     # 3) lectura de una página
@@ -507,21 +470,29 @@ class SeqFile:
         cant_prin, cant_aux, curr_arc, curr_pos = self._read_header()
         # si la búsqueda binaria encontró un predecesor, empezamos desde ahí
         if idx != -1:
-            curr_arc = 0 # empezamos en el principal
-            curr_pos = idx
+            # verificamos que el predecesor no sea mayor que begin antes de usarlo
+            # (binary_search devuelve el último visto menor, pero puede ser >= begin)
+            pred_rec = self._read_record(idx, is_aux=False)
+            if pred_rec.id < begin:
+                # el predecesor es menor que begin: empezamos desde él y avanzamos
+                curr_arc = 0
+                curr_pos = idx
+            elif pred_rec.id >= begin:
+                # el predecesor ya está dentro del rango, empezamos desde él
+                curr_arc = 0
+                curr_pos = idx
         # recorremos la cadena lógica saltando entre archivos
         while curr_arc != -1:
             # leemos el registro actual (esto suma +1 a tus lecturas de página)
             rec = self._read_record(curr_pos, is_aux=(curr_arc == 1))
-            # si el id del registro está dentro del rango, lo agregamos
-            if begin <= rec.id <= end:
-                # solo agregamos registros que no estén marcados como borrados (-1)
-                if rec.id != -1:
-                    resultados.append(rec)
             # si el id ya superó el límite superior del rango, podemos dejar de buscar
             # esto es gracias a que la cadena siempre está ordenada lógicamente
             if rec.id > end:
                 break
+            # si el id del registro está dentro del rango, lo agregamos
+            # solo agregamos registros que no estén marcados como borrados (-1)
+            if begin <= rec.id <= end and rec.id != -1:
+                resultados.append(rec)
             # avanzamos al siguiente registro siguiendo el puntero
             curr_arc = rec.next_file
             curr_pos = rec.next_pos

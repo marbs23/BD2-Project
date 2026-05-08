@@ -23,6 +23,7 @@ from parser_sql import (
     NodoSelectRango,
     NodoSelectRadio,
     NodoSelectKNN,
+    NodoSelectTodos,
     NodoInsert,
     NodoDelete,
 )
@@ -125,6 +126,7 @@ class Ejecutor:
     # ── dispatcher ──────────────────────────────────────────────────────
     def _dispatch(self, nodo) -> ResultadoEjecucion:
         if isinstance(nodo, NodoCreateTable):   return self._crear_tabla(nodo)
+        if isinstance(nodo, NodoSelectTodos):   return self._select_todos(nodo)
         if isinstance(nodo, NodoSelectPuntual): return self._select_puntual(nodo)
         if isinstance(nodo, NodoSelectRango):   return self._select_rango(nodo)
         if isinstance(nodo, NodoSelectRadio):   return self._select_radio(nodo)
@@ -137,90 +139,24 @@ class Ejecutor:
         return r
 
     # ── CREATE ──────────────────────────────────────────────────────────
-    def crear_tabla_desde_archivo(self, table_name: str, columns: Dict[str, str], file_path: str) -> ResultadoEjecucion:
+    def crear_tabla_desde_archivo(self, table_name: str, columns: Dict[str, str], file_path: str, tecnica: str = "BPTREE") -> ResultadoEjecucion:
         """
-        Crea una tabla y carga datos desde un archivo CSV
-        
-        Args:
-            table_name: Nombre de la tabla
-            columns: Diccionario de columnas {nombre: tipo}
-            file_path: Ruta al archivo CSV
-            
-        Returns:
-            ResultadoEjecucion con el resultado de la operación
+        Crea una tabla y carga datos desde un archivo CSV.
+        Delega en _crear_tabla construyendo un NodoCreateTable sintético.
         """
+        from parser_sql import NodoColumna, NodoCreateTable
         r = ResultadoEjecucion("CREATE TABLE FROM FILE", table_name)
         t0 = time.time()
-        
         try:
-            # Determinar la técnica de indexación (usar primera columna como clave por defecto)
-            first_col = list(columns.keys())[0]
-            tecnica = "BPTREE"  # Por defecto
-            col_clave = first_col
-            
-            if tecnica not in TECNICAS_VALIDAS:
-                r.ok = False
-                r.mensaje = f"Técnica '{tecnica}' no reconocida. Usa: {TECNICAS_VALIDAS}"
-                return r
-            
-            disponibles = {"BPTREE": BPTREE_OK, "SEQUENTIAL": SEQFILE_OK,
-                          "HASH": HASH_OK, "RTREE": RTREE_OK}
-            if not disponibles[tecnica]:
-                r.ok = False
-                r.mensaje = f"Módulo {tecnica} no disponible"
-                return r
-            
-            base = os.path.join(self.directorio, table_name)
-            
-            # Para from_csv(), no creamos el índice aquí, lo crea el método from_csv()
-            indice = None
-            
-            # Cargar datos usando el método from_csv() de cada índice
-            registros_cargados = 0
-            
-            if tecnica == "BPTREE":
-                # Usar el método from_csv() del BPlusTree
-                from bplustree import BPlusTree
-                indice = BPlusTree.from_csv(base, file_path)
-                root_page, total_pages, height, total_records = indice._read_header()
-                registros_cargados = total_records
-                
-            elif tecnica == "SEQUENTIAL":
-                # Usar el método from_csv() del SequentialFile
-                from sequential_file import SequentialFile
-                indice = SequentialFile.from_csv(base, file_path)
-                registros_cargados = len(indice.records) if hasattr(indice, 'records') else 0
-                
-            elif tecnica == "HASH":
-                # Usar el método from_csv() del ExtendibleHash
-                from extendible_hash import ExtendibleHash
-                # El ExtendibleHash necesita paths separados para datos e índice
-                data_path = base + "_data"
-                index_path = base + "_index"
-                indice = ExtendibleHash.from_csv(data_path, index_path, file_path)
-                registros_cargados = getattr(indice, 'record_count', 0)
-                
-            elif tecnica == "RTREE":
-                # Usar el método bulk_load_from_csv() del RTree
-                from rtree.rtree_index import RTreeIndex
-                # Para RTree, asumir que las primeras dos columnas son coordenadas
-                coords = list(columns.keys())[:2]
-                lon_col, lat_col = coords[0], coords[1]
-                indice = RTreeIndex(base)
-                registros_cargados = indice.bulk_load_from_csv(file_path, lon_col, lat_col)
-            
-            # Actualizar estadísticas
-            r.ok = True
-            r.afectados = registros_cargados
-            r.mensaje = f"Tabla '{table_name}' creada y cargados {registros_cargados} registros desde '{file_path}'"
-            
-        except FileNotFoundError:
-            r.ok = False
-            r.mensaje = f"Archivo no encontrado: {file_path}"
+            cols = []
+            for i, (nombre, tipo) in enumerate(columns.items()):
+                idx = tecnica.upper() if i == 0 else None
+                cols.append(NodoColumna(nombre=nombre, tipo=tipo, indice=idx))
+            nodo = NodoCreateTable(tabla=table_name, columnas=cols, archivo=file_path)
+            r = self._crear_tabla(nodo)
         except Exception as e:
             r.ok = False
-            r.mensaje = f"Error creando tabla desde archivo: {str(e)}"
-        
+            r.mensaje = f"Error creando tabla desde archivo: {e}"
         r.tiempo_ms = (time.time() - t0) * 1000
         return r
     
@@ -282,6 +218,37 @@ class Ejecutor:
         self._stats(r, indice)
         r.mensaje = (f"Tabla '{nodo.tabla}' creada con {tecnica} sobre '{col_clave}'"
                      + (f" cargando '{nodo.archivo}'" if nodo.archivo else ""))
+        return r
+
+    # ── SELECT todos (sin WHERE) ─────────────────────────────────────────
+    def _select_todos(self, nodo: "NodoSelectTodos") -> ResultadoEjecucion:
+        r = ResultadoEjecucion("SELECT ALL", nodo.tabla)
+        info = self._verif(nodo.tabla, r)
+        if info is None:
+            return r
+        indice = info["indice"]
+        tecnica = info["tecnica"]
+        t0 = time.time()
+        self._reset(indice)
+        try:
+            if tecnica == "RTREE":
+                r.ok = False
+                r.mensaje = "SELECT * sin WHERE no soportado en RTree; usa POINT+RADIUS"
+                return r
+            if tecnica == "HASH":
+                r.ok = False
+                r.mensaje = "SELECT * sin WHERE no soportado en ExtendibleHash"
+                return r
+            # BPTree y Sequential soportan range_search con rango máximo
+            registros = indice.range_search(0, 2**31 - 1)
+            if nodo.limite is not None:
+                registros = registros[:nodo.limite]
+            r.registros = registros
+        except Exception as e:
+            r.ok = False
+            r.mensaje = str(e)
+        r.tiempo_ms = (time.time() - t0) * 1000
+        self._stats(r, indice)
         return r
 
     # ── SELECT puntual ──────────────────────────────────────────────────
