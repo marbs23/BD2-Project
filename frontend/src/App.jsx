@@ -17,10 +17,14 @@ import {
   Clock,
   HardDrive,
 } from 'lucide-react';
+import TableSidebar from './components/TableInfo';
 
 
 // ── Componente de visualización R-Tree ────────────────────────────────────────
 const RTreeViewer = ({ rtreeQuery, rtreePoints, rtreeTables, onLoadPoints }) => {
+  console.log("RTreeViewer render", { rtreeQuery, rtreePoints, rtreeTables });
+
+
   const canvasRef = React.useRef(null);
   const [selectedTable, setSelectedTable] = React.useState('');
 
@@ -643,6 +647,7 @@ const App = () => {
     try {
       const response = await fetch('http://localhost:8000/api/tables?database_path=.');
       const data = await response.json();
+      console.log('Tablas cargadas:', data);
       if (data.success) {
         const tablesMap = {};
         const rtree = [];
@@ -980,29 +985,11 @@ const App = () => {
           </div>
 
           <div className="space-y-6">
-            <div>
-              <p className="text-xs font-semibold text-slate-500 uppercase mb-3 px-2">Tablas (Public)</p>
-              <div className="space-y-1">
-                {/* Tablas dinámicas desde el backend */}
-                <div className="space-y-1">
-                  {Object.keys(tables).length > 0 ? (
-                    Object.keys(tables).map(tableName => (
-                      <button 
-                        key={tableName}
-                        onClick={() => setActiveTab('console')}
-                        className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${activeTab === 'console' ? 'bg-indigo-600/20 text-indigo-400' : 'hover:bg-slate-800 text-slate-400'}`}
-                      >
-                        <TableIcon size={16} /> {tableName}
-                      </button>
-                    ))
-                  ) : (
-                    <div className="text-slate-500 text-sm px-3 py-2">
-                      No hay tablas creadas aún
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
+            <TableSidebar tables={tables} onTableClick={(table) => {
+              if (table.index_type === 'RTREE' || table.name.includes('rtree')) {
+                loadRtreePoints(table.name);
+              }
+            }} />
 
             <div>
               <p className="text-xs font-semibold text-slate-500 uppercase mb-3 px-2">Herramientas</p>

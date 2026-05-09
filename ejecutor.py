@@ -94,18 +94,22 @@ class Ejecutor:
     def ejecutar(self, sql: str) -> List[ResultadoEjecucion]:
         try:
             programa = parsear(sql)
+            print(f"SQL parseado exitosamente: {len(programa.sentencias)} sentencia(s) encontradas.")
+            print(f"Árbol de sintaxis abstracta (AST): {programa}")
         except SyntaxError as e:
             r = ResultadoEjecucion("PARSE_ERROR", "")
             r.ok = False
             r.mensaje = str(e)
             return [r]
 
+        print(programa.sentencias)
         return [self._dispatch(n) for n in programa.sentencias]
 
     def tablas(self) -> List[str]:
         return list(self._catalogo.keys())
 
     def info_tabla(self, nombre: str) -> Optional[dict]:
+        #print("catalogo", self._catalogo)
         info = self._catalogo.get(nombre)
         if not info:
             return None
@@ -153,6 +157,7 @@ class Ejecutor:
                 idx = tecnica.upper() if i == 0 else None
                 cols.append(NodoColumna(nombre=nombre, tipo=tipo, indice=idx))
             nodo = NodoCreateTable(tabla=table_name, columnas=cols, archivo=file_path)
+
             r = self._crear_tabla(nodo)
         except Exception as e:
             r.ok = False
@@ -162,6 +167,7 @@ class Ejecutor:
     
     def _crear_tabla(self, nodo: NodoCreateTable) -> ResultadoEjecucion:
         r = ResultadoEjecucion("CREATE TABLE", nodo.tabla)
+
         t0 = time.time()
 
         col_clave = None
@@ -230,10 +236,15 @@ class Ejecutor:
                     indice.bulk_load_from_csv(
                         nodo.archivo, lon_col=_lon_col, lat_col=_lat_col
                     )
+
+            print(f"Índice '{nodo.tabla}' creado exitosamente con técnica '{tecnica}'.")
+    
         except Exception as e:
             r.ok = False
             r.mensaje = f"Error creando índice: {e}"
             return r
+
+        print(f"Índice '{nodo.tabla}' creado exitosamente con técnica '{tecnica}' 2.")
 
         self._catalogo[nodo.tabla] = {
             "indice": indice,
@@ -409,7 +420,10 @@ class Ejecutor:
                     indice.insert(rec)
             r.afectados = 1
             r.mensaje = f"Registro insertado en '{nodo.tabla}'"
+
+            print(f"Registro insertado en '{nodo.tabla}': {vals}")
         except Exception as e:
+            print(f"Error al insertar registro en '{nodo.tabla}': {vals}")
             r.ok = False
             r.mensaje = str(e)
         r.tiempo_ms = (time.time() - t0) * 1000
@@ -444,6 +458,9 @@ class Ejecutor:
 
     # ── helpers ─────────────────────────────────────────────────────────
     def _verif(self, nombre: str, r: ResultadoEjecucion):
+        # es temporal    
+        nombre = nombre.replace("_bpt", "")
+        
         if nombre not in self._catalogo:
             r.ok = False
             r.mensaje = f"Tabla '{nombre}' no existe."

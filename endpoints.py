@@ -139,6 +139,7 @@ async def execute_sql(request: SQLQuery):
         
         execution_time_ms = (end_time - start_time).total_seconds() * 1000
         
+
         # Procesar resultados
         if not resultados:
             return ExecuteResponse(
@@ -182,6 +183,7 @@ async def execute_sql(request: SQLQuery):
         # Determinar si la operación fue exitosa
         overall_success = success_count == len(resultados)
         
+        print(f"Consulta ejecutada en {execution_time_ms:.2f} ms con {total_io} operaciones de I/O (Reads: {total_reads}, Writes: {total_writes})")
         return ExecuteResponse(
             success=overall_success,
             data=response_data if response_data else None,
@@ -258,6 +260,7 @@ async def list_tables(database_path: str = "."):
     try:
         ejecutor = get_ejecutor(database_path)
         
+        info_tabla = ejecutor.info_tabla("books")
         # Intentar obtener información de tablas existentes
         # Esto depende de la implementación específica del ejecutor
         tables_info = []
@@ -267,12 +270,16 @@ async def list_tables(database_path: str = "."):
             for file in os.listdir(database_path):
                 if file.endswith('.bin'):
                     table_name = file.replace('.bin', '')
+
+                    info_tabla = ejecutor.info_tabla(table_name.replace("_bpt", ""))
+
                     tables_info.append({
                         "name": table_name,
                         "type": "index_file",
-                        "file": file
+                        "file": file,
+                        "info": info_tabla
                     })
-        
+                    
         return {
             "success": True,
             "tables": tables_info,
