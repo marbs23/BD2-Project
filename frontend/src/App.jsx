@@ -628,6 +628,7 @@ const App = () => {
   const [queryResult, setQueryResult] = useState(null);
   const [queryError, setQueryError] = useState(null);
   const [notification, setNotification] = useState(null);
+  const [isQueryLoading, setIsQueryLoading] = useState(false);
   
   // Estados para estadísticas y gestión de índices
   const [stats, setStats] = useState(null);
@@ -652,6 +653,9 @@ const App = () => {
 
   // MOTOR de consultas - comunicación con backend
   const executeQuery = async () => {
+    if (isQueryLoading) return; // Prevenir múltiples ejecuciones
+    
+    setIsQueryLoading(true);
     setQueryError(null);
     setQueryResult(null);
 
@@ -706,6 +710,8 @@ const App = () => {
     } catch (err) {
       setQueryError('Error de conexión con el backend: ' + err.message);
       showNotification('No se pudo conectar con el backend', 'error');
+    } finally {
+      setIsQueryLoading(false);
     }
   };
 
@@ -986,9 +992,24 @@ const App = () => {
                     </button>
                     <button 
                       onClick={executeQuery}
-                      className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded-lg flex items-center gap-2 text-sm font-bold transition-all shadow-lg shadow-emerald-900/20"
+                      disabled={isQueryLoading}
+                      className={`px-4 py-1.5 rounded-lg flex items-center gap-2 text-sm font-bold transition-all shadow-lg ${
+                        isQueryLoading 
+                          ? 'bg-slate-600 text-slate-300 cursor-not-allowed' 
+                          : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-900/20'
+                      }`}
                     >
-                      <Play size={14} fill="currentColor" /> EJECUTAR
+                      {isQueryLoading ? (
+                        <>
+                          <RotateCcw size={14} className="animate-spin" /> 
+                          EJECUTANDO...
+                        </>
+                      ) : (
+                        <>
+                          <Play size={14} fill="currentColor" /> 
+                          EJECUTAR
+                        </>
+                      )}
                     </button>
                   </div>
                   <textarea 

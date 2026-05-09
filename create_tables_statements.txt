@@ -1,300 +1,159 @@
--- Sentencias SQL para crear tablas con diferentes índices y tamaños
--- Formato: CREATE TABLE nombre_tabla (columnas) FROM FILE "ruta_archivo";
+# ================================================================
+# BD2 PROJECT - CONSULTAS DE DEMOSTRACIÓN PARA PRESENTACIÓN
+# ================================================================
+# Este archivo contiene las consultas SQL necesarias para demostrar
+# el funcionamiento completo del proyecto BD2 con sus 4 tipos de índices.
+#
+# TIPOS DE ÍNDICES IMPLEMENTADOS:
+# 1. B+ Tree - Búsqueda eficiente por clave primaria
+# 2. Extendible Hash - Acceso directo por clave con manejo de colisiones
+# 3. Sequential File - Acceso secuencial optimizado
+# 4. R-Tree - Índice espacial para consultas geográficas
 
--- Tablas con índice BPTREE (soportan SELECT * sin WHERE)
-CREATE TABLE books_bpt_1k (
-book_key INT INDEX BPTREE,
-title TEXT,
-author TEXT,
-pages FLOAT,
-average_rating FLOAT,
-published_date FLOAT
-) FROM FILE "books/books_1000.csv";
+# ================================================================
+# 1. DEMOSTRACIÓN B+ TREE
+# ================================================================
+# Búsqueda por clave primaria usando índice B+ Tree
+# Muestra acceso eficiente O(log n) con estadísticas de I/O
 
-CREATE TABLE books_bpt_10k (
-book_key INT INDEX BPTREE,
-title TEXT,
-author TEXT,
-pages FLOAT,
-average_rating FLOAT,
-published_date FLOAT
-) FROM FILE "books/books_10000.csv";
+-- Búsqueda puntual en tabla B+ Tree (1K registros)
+SELECT * FROM books_bpt_1k WHERE book_key = 1;
 
-CREATE TABLE books_bpt_100k (
-book_key INT INDEX BPTREE,
-title TEXT,
-author TEXT,
-pages FLOAT,
-average_rating FLOAT,
-published_date FLOAT
-) FROM FILE "books/books_100000.csv";
+-- Búsqueda puntual en tabla B+ Tree (diferente clave)  
+SELECT * FROM books_bpt_1k WHERE book_key = 500;
 
-CREATE TABLE books_bpt_1m (
-book_key INT INDEX BPTREE,
-title TEXT,
-author TEXT,
-pages FLOAT,
-average_rating FLOAT,
-published_date FLOAT
-) FROM FILE "books/books_1000000.csv";
+-- Búsqueda por rango usando BETWEEN
+SELECT * FROM books_bpt_1k WHERE book_key BETWEEN 100 AND 200;
 
--- Tablas con índice HASH (solo soportan SELECT con WHERE exacto)
-CREATE TABLE books_hash_1k (
-book_key INT INDEX HASH,
-title TEXT,
-author TEXT,
-pages FLOAT,
-average_rating FLOAT,
-published_date FLOAT
-) FROM FILE "books/books_1000.csv";
+# ================================================================
+# 2. DEMOSTRACIÓN EXTENDIBLE HASH
+# ================================================================
+# Búsqueda por clave usando índice Hash Extensible
+# Muestra acceso directo O(1) con manejo de colisiones
 
-CREATE TABLE books_hash_10k (
-book_key INT INDEX HASH,
-title TEXT,
-author TEXT,
-pages FLOAT,
-average_rating FLOAT,
-published_date FLOAT
-) FROM FILE "books/books_10000.csv";
+-- Búsqueda puntual en tabla Hash (1K registros)
+SELECT * FROM books_hash_1k WHERE book_key = 1;
 
-CREATE TABLE books_hash_100k (
-book_key INT INDEX HASH,
-title TEXT,
-author TEXT,
-pages FLOAT,
-average_rating FLOAT,
-published_date FLOAT
-) FROM FILE "books/books_100000.csv";
+-- Búsqueda puntual con clave diferente
+SELECT * FROM books_hash_1k WHERE book_key = 999;
 
-CREATE TABLE books_hash_1m (
-book_key INT INDEX HASH,
-title TEXT,
-author TEXT,
-pages FLOAT,
-average_rating FLOAT,
-published_date FLOAT
-) FROM FILE "books/books_1000000.csv";
+-- Búsqueda con clave que probablemente cause colisión
+SELECT * FROM books_hash_1k WHERE book_key = 256;
 
--- Tablas con índice SEQUENTIAL (soportan SELECT * sin WHERE)
-CREATE TABLE books_seq_1k (
-book_key INT INDEX SEQUENTIAL,
-title TEXT,
-author TEXT,
-pages FLOAT,
-average_rating FLOAT,
-published_date FLOAT
-) FROM FILE "books/books_1000.csv";
+# ================================================================
+# 3. DEMOSTRACIÓN SEQUENTIAL FILE
+# ================================================================
+# Búsqueda usando acceso secuencial optimizado
+# Muestra escaneo eficiente con estadísticas de I/O
 
-CREATE TABLE books_seq_10k (
-book_key INT INDEX SEQUENTIAL,
-title TEXT,
-author TEXT,
-pages FLOAT,
-average_rating FLOAT,
-published_date FLOAT
-) FROM FILE "books/books_10000.csv";
+-- Búsqueda puntual en tabla Sequential (1K registros)
+SELECT * FROM books_seq_1k WHERE book_key = 1;
 
-CREATE TABLE books_seq_100k (
-book_key INT INDEX SEQUENTIAL,
-title TEXT,
-author TEXT,
-pages FLOAT,
-average_rating FLOAT,
-published_date FLOAT
-) FROM FILE "books/books_100000.csv";
+-- Búsqueda por rango en archivo secuencial
+SELECT * FROM books_seq_1k WHERE book_key BETWEEN 100 AND 200;
 
-CREATE TABLE books_seq_1m (
-book_key INT INDEX SEQUENTIAL,
-title TEXT,
-author TEXT,
-pages FLOAT,
-average_rating FLOAT,
-published_date FLOAT
-) FROM FILE "books/books_1000000.csv";
+-- Búsqueda con LIMIT para mostrar eficiencia
+SELECT * FROM books_seq_1k WHERE book_key > 500 LIMIT 10;
 
--- Tablas con índice RTREE (requieren columnas de coordenadas lon/lat)
-CREATE TABLE coords_rtree_1k (
-point_id INT INDEX RTREE,
-lon FLOAT,
-lat FLOAT
-) FROM FILE "coords/coords_1000.csv";
+# ================================================================
+# 4. DEMOSTRACIÓN R-TREE (ÍNDICES ESPACIALES)
+# ================================================================
+# Consultas geográficas con visualización en plano
+# El frontend mostrará automáticamente la visualización espacial
 
-CREATE TABLE coords_rtree_10k (
-point_id INT INDEX RTREE,
-lon FLOAT,
-lat FLOAT
-) FROM FILE "coords/coords_10000.csv";
+-- Búsqueda por radio: encuentra todos los puntos dentro de un círculo
+-- Coordenadas: (29.266858, 41.047655) - Estambul, Turquía
+-- Radio: 100 unidades
+-- RESULTADO: Visualización con círculo de búsqueda y puntos encontrados
+SELECT * FROM coords_rtree_10k_rtree WHERE point_id IN (POINT(29.266858, 41.047655), RADIUS 100);
 
-CREATE TABLE coords_rtree_100k (
-point_id INT INDEX RTREE,
-lon FLOAT,
-lat FLOAT
-) FROM FILE "coords/coords_100000.csv";
+-- Búsqueda KNN: encuentra los 5 puntos más cercanos
+-- Coordenadas: (29.266858, 41.047655) - Estambul, Turquía
+-- K: 5 vecinos más cercanos
+-- RESULTADO: Visualización con líneas de conexión a los 5 vecinos más cercanos
+SELECT * FROM coords_rtree_10k_rtree WHERE point_id IN (POINT(29.266858, 41.047655), K 5);
 
-CREATE TABLE coords_rtree_1m (
-point_id INT INDEX RTREE,
-lon FLOAT,
-lat FLOAT
-) FROM FILE "coords/coords_1000000.csv";
+-- Búsqueda por radio en Nueva York
+-- Coordenadas: (-74.0060, 40.7128) - Nueva York, EE.UU.
+-- Radio: 50 unidades
+SELECT * FROM coords_rtree_10k_rtree WHERE point_id IN (POINT(-74.0060, 40.7128), RADIUS 50);
 
--- Ejemplos de consultas para cada tipo de índice:
+-- Búsqueda KNN en Londres
+-- Coordenadas: (-0.1278, 51.5074) - Londres, Reino Unido
+-- K: 10 vecinos más cercanos
+SELECT * FROM coords_rtree_10k_rtree WHERE point_id IN (POINT(-0.1278, 51.5074), K 10);
 
--- Para BPTREE y SEQUENTIAL:
--- SELECT * FROM books_bpt_1k;
--- SELECT * FROM books_seq_1k WHERE book_key = 2145253;
--- SELECT * FROM books_bpt_1k WHERE book_key BETWEEN 2145253 AND 958696;
+# ================================================================
+# 5. OPERACIONES DE INSERCIÓN Y MODIFICACIÓN
+# ================================================================
+# Demostración de operaciones de escritura en diferentes índices
 
--- Para HASH (solo búsquedas exactas):
--- SELECT * FROM books_hash_1k WHERE book_key = 2145253;
--- NO SOPORTADO: SELECT * FROM books_hash_1k;
--- NO SOPORTADO: SELECT * FROM books_hash_1k WHERE book_key BETWEEN 1 AND 100;
+-- Inserción en tabla B+ Tree
+INSERT INTO books_bpt_1k VALUES (9999, "Nuevo Libro BD2", "Autor Demo", 250, 4.5, 2024);
 
--- Para RTREE (con archivos de coordenadas):
--- SELECT * FROM coords_rtree_1k WHERE lon IN (POINT(29.266858, 41.047655), RADIUS 10);
--- SELECT * FROM coords_rtree_1k WHERE lon IN (POINT(29.266858, 41.047655), K 5);
--- NOTA: RTREE requiere siempre POINT + RADIUS o POINT + K
+-- Inserción en tabla Hash
+INSERT INTO books_hash_1k VALUES (8888, "Libro Hash Demo", "Autor Hash", 180, 3.8, 2023);
 
-================================================================================
-CONSULTAS DE DEMOSTRACIÓN - FUNCIONALIDADES DEL PROYECTO
-================================================================================
+-- Inserción en tabla Sequential
+INSERT INTO books_seq_1k VALUES (7777, "Libro Sequential Demo", "Autor Seq", 320, 4.2, 2024);
 
--- 1. OPERACIONES CRUD BÁSICAS (CREATE, INSERT, SELECT, DELETE)
--- =============================================================
+# ================================================================
+# 6. CONSULTAS COMPARATIVAS DE RENDIMIENTO
+# ================================================================
+# Estas consultas permiten comparar el rendimiento entre diferentes índices
 
--- 1.1 Inserción de datos
-INSERT INTO demo_bpt VALUES (1, "Database Systems", "Elmasri", 750, 4.5, 2015);
-INSERT INTO demo_bpt VALUES (2, "Algorithms", "Cormen", 1200, 4.8, 2009);
-INSERT INTO demo_bpt VALUES (3, "Operating Systems", "Tanenbaum", 800, 4.2, 2014);
+-- MISMA BÚSQUEDA en diferentes tipos de índices:
+-- B+ Tree: SELECT * FROM books_bpt_1k WHERE book_key = 1;
+-- Hash:    SELECT * FROM books_hash_1k WHERE book_key = 1;  
+-- Sequential: SELECT * FROM books_seq_1k WHERE book_key = 1;
 
-INSERT INTO demo_hash VALUES (1, "Database Systems", "Elmasri", 750, 4.5, 2015);
-INSERT INTO demo_hash VALUES (2, "Algorithms", "Cormen", 1200, 4.8, 2009);
+-- Comparar tiempos de ejecución y operaciones de I/O en el frontend
+-- Observar las diferencias en:
+-- - Tiempo de ejecución (ms)
+-- - Número de lecturas/escrituras (I/O)
+-- - Eficiencia según el tipo de consulta
 
-INSERT INTO demo_seq VALUES (1, "Database Systems", "Elmasri", 750, 4.5, 2015);
-INSERT INTO demo_seq VALUES (2, "Algorithms", "Cormen", 1200, 4.8, 2009);
-INSERT INTO demo_seq VALUES (3, "Operating Systems", "Tanenbaum", 800, 4.2, 2014);
-
-INSERT INTO demo_rtree VALUES (1, -74.0060, 40.7128);  -- NYC
-INSERT INTO demo_rtree VALUES (2, -0.1278, 51.5074);   -- London
-INSERT INTO demo_rtree VALUES (3, 2.3522, 48.8566);    -- Paris
-
--- 1.2 Consultas SELECT puntuales (todas las técnicas soportan)
-SELECT * FROM demo_bpt WHERE book_key = 1;
-SELECT * FROM demo_hash WHERE book_key = 2;
-SELECT * FROM demo_seq WHERE book_key = 3;
-
--- 1.3 Consultas SELECT por rango (solo BPTREE y SEQUENTIAL)
-SELECT * FROM demo_bpt WHERE book_key BETWEEN 1 AND 3;
-SELECT * FROM demo_seq WHERE book_key BETWEEN 1 AND 2;
-
--- 1.4 Consultas SELECT espaciales (solo RTREE)
-SELECT * FROM demo_rtree WHERE lon IN (POINT(-74.0060, 40.7128), RADIUS 1000);
-SELECT * FROM demo_rtree WHERE lon IN (POINT(-74.0060, 40.7128), K 2);
-
--- 1.5 Eliminación de registros
-DELETE FROM demo_bpt WHERE book_key = 1;
-DELETE FROM demo_hash WHERE book_key = 2;
-DELETE FROM demo_seq WHERE book_key = 3;
-
--- 2. PRUEBAS CON DATASET REAL (books_1000.csv)
--- ===========================================
-
--- 2.1 Pruebas de rendimiento con datos reales
--- Búsquedas puntuales (todas las técnicas)
-SELECT * FROM books_bpt_test WHERE book_key = 2145253;
-SELECT * FROM books_hash_test WHERE book_key = 2145253;
-SELECT * FROM books_seq_test WHERE book_key = 2145253;
-
--- 2.2 Búsquedas por rango (solo BPTREE y SEQUENTIAL)
-SELECT * FROM books_bpt_test WHERE book_key BETWEEN 2145253 AND 958696;
-SELECT * FROM books_seq_test WHERE book_key BETWEEN 2145253 AND 958696;
-
--- 2.3 Consulta completa (solo BPTREE y SEQUENTIAL)
-SELECT * FROM books_bpt_test;
-SELECT * FROM books_seq_test LIMIT 100;
-
--- 3. PRUEBAS CON DATASET ESPACIAL (coords_1000.csv)
--- ================================================
-
--- 3.1 Consultas espaciales
--- Búsqueda por radio (encontrar puntos dentro de un radio)
-SELECT * FROM coords_rtree_test WHERE lon IN (POINT(29.266858, 41.047655), RADIUS 50);
-SELECT * FROM coords_rtree_test WHERE lon IN (POINT(13.348965, 52.070794), RADIUS 100);
-
--- 3.2 Búsqueda KNN (encontrar K puntos más cercanos)
-SELECT * FROM coords_rtree_test WHERE lon IN (POINT(29.266858, 41.047655), K 5);
-SELECT * FROM coords_rtree_test WHERE lon IN (POINT(13.348965, 52.070794), K 10);
-
--- 4. PRUEBAS DE CONCURRENCIA (SIMULACIÓN)
--- ======================================
-
--- 4.1 Transacción 1: Inserciones concurrentes
-INSERT INTO demo_bpt VALUES (10, "Transaction Book 1", "Author A", 300, 4.0, 2020);
-INSERT INTO demo_bpt VALUES (11, "Transaction Book 2", "Author B", 400, 4.2, 2021);
-
--- 4.2 Transacción 2: Lecturas concurrentes
-SELECT * FROM demo_bpt WHERE book_key = 10;
-SELECT * FROM demo_bpt WHERE book_key = 11;
-
--- 4.3 Transacción 3: Actualizaciones simuladas (DELETE + INSERT)
-DELETE FROM demo_bpt WHERE book_key = 10;
-INSERT INTO demo_bpt VALUES (10, "Updated Book", "Updated Author", 350, 4.5, 2022);
-
--- 5. PRUEBAS DE LÍMITES Y ERRORES
--- ================================
-
--- 5.1 Intentar operación no soportada en HASH (debe fallar)
--- SELECT * FROM books_hash_test;  -- ERROR: HASH no soporta SELECT sin WHERE
--- SELECT * FROM books_hash_test WHERE book_key BETWEEN 1 AND 100;  -- ERROR: HASH no soporta range
-
--- 5.2 Intentar operación no soportada en RTREE (debe fallar)
--- SELECT * FROM coords_rtree_test;  -- ERROR: RTREE no soporta SELECT sin WHERE
--- SELECT * FROM coords_rtree_test WHERE point_id = 1;  -- ERROR: RTREE requiere POINT+RADIUS/K
-
--- 5.3 Intentar búsqueda en tabla inexistente (debe fallar)
--- SELECT * FROM tabla_inexistente WHERE book_key = 1;
-
--- 6. PRUEBAS DE ESCALABILIDAD (DIFERENTES TAMAÑOS)
--- ================================================
-
--- 6.1 Comparación de rendimiento por tamaño de dataset
--- (Ejecutar estas consultas para medir tiempos y accesos a disco)
-
--- Dataset 1K
-SELECT * FROM books_bpt_1k WHERE book_key = 2145253;
-SELECT * FROM books_hash_1k WHERE book_key = 2145253;
-SELECT * FROM books_seq_1k WHERE book_key = 2145253;
-
--- Dataset 10K
-SELECT * FROM books_bpt_10k WHERE book_key = 2145253;
-SELECT * FROM books_hash_10k WHERE book_key = 2145253;
-SELECT * FROM books_seq_10k WHERE book_key = 2145253;
-
--- Dataset 100K
-SELECT * FROM books_bpt_100k WHERE book_key = 2145253;
-SELECT * FROM books_hash_100k WHERE book_key = 2145253;
-SELECT * FROM books_seq_100k WHERE book_key = 2145253;
-
--- Dataset 1M
-SELECT * FROM books_bpt_1m WHERE book_key = 2145253;
-SELECT * FROM books_hash_1m WHERE book_key = 2145253;
-SELECT * FROM books_seq_1m WHERE book_key = 2145253;
-
--- ================================================
--- Las consultas RTREE deben mostrar visualización en plano:
--- - Puntos de consulta (center)
--- - Radio de búsqueda (círculo)
--- - Puntos encontrados (marcados)
--- - Puntos KNN más cercanos (con líneas de conexión)
-
--- Consultas para visualización (SINTAXIS CORREGIDA):
--- Usar la columna correcta según el CSV: point_id, lon, lat
--- La columna espacial debe ser la que contiene las coordenadas
-
--- Búsqueda por radio
-SELECT * FROM coords_rtree_test WHERE lon IN (POINT(29.266858, 41.047655), RADIUS 100);
- 
--- Búsqueda KNN (5 puntos más cercanos)
-SELECT * FROM coords_rtree_test WHERE lon IN (POINT(29.266858, 41.047655), K 5);
- 
--- Otra ubicación (coordenadas de Londres)
-SELECT * FROM coords_rtree_test WHERE lon IN (POINT(-0.1278, 51.5074), RADIUS 50);
+# ================================================================
+# 7. NOTAS PARA LA PRESENTACIÓN
+# ================================================================
+#
+# CARACTERÍSTICAS A DEMOSTRAR:
+#
+# 1. B+ TREE:
+#    - Acceso eficiente O(log n)
+#    - Buen rendimiento para búsquedas por rango
+#    - Balance automático del árbol
+#
+# 2. EXTENDIBLE HASH:
+#    - Acceso directo O(1) en caso ideal
+#    - Manejo dinámico de colisiones
+#    - Rehashing automático cuando es necesario
+#
+# 3. SEQUENTIAL FILE:
+#    - Acceso secuencial optimizado
+#    - Buen rendimiento para consultas de rango
+#    - Simplicidad y fiabilidad
+#
+# 4. R-TREE:
+#    - Índice espacial para coordenadas geográficas
+#    - Búsqueda por radio (circular)
+#    - Búsqueda KNN (k vecinos más cercanos)
+#    - Visualización automática en el frontend
+#
+# MÉTRICAS A OBSERVAR:
+# - Tiempo de ejecución (ms)
+# - Operaciones de I/O (lecturas/escrituras)
+# - Uso de memoria
+# - Escalabilidad con diferentes volúmenes de datos
+#
+# VISUALIZACIÓN ESPACIAL:
+# Las consultas R-Tree activan automáticamente la visualización
+# en el frontend mostrando:
+# - Puntos de consulta (centro rojo)
+# - Radio de búsqueda (círculo amarillo)
+# - Puntos encontrados (marcadores verdes)
+# - Conexiones KNN (líneas azules)
+#
+# ================================================================
+# FIN DEL ARCHIVO DE DEMOSTRACIÓN
+# ================================================================
