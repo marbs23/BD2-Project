@@ -214,21 +214,20 @@ class SeqFile:
 
     # 3) lectura de una página
     def _read_page(self, is_aux: bool, page_id: int) -> bytes:
-        target_file = self.aux_file if is_aux else self.file  # archivo a leer
-        # calculamos el offset
+        target_file = self.aux_file if is_aux else self.file
+        # el archivo se escribe de forma contigua (sin padding entre páginas)
+        # cada "página lógica" contiene RECORDS_PER_PAGE registros consecutivos
         base_offset = HEADER_SIZE if not is_aux else 0
-        offset = base_offset + (page_id * PAGE_SIZE)
-        # verificamos el tamaño del archivo para no leer fuera de los límites
+        offset = base_offset + page_id * RECORDS_PER_PAGE * RECORD_SIZE
         target_file.seek(0, 2)
         file_size = target_file.tell()
         if offset >= file_size:
-            return b"\x00" * PAGE_SIZE # si está fuera de rango, devolvemos bytes vacíos
-        target_file.seek(offset) # nos ubicamos en la página
-        self.read_count += 1 # contamos acceso al bloque del header
-        data = target_file.read(PAGE_SIZE) # leemos la página
-        # si la lectura fue incompleta (final del archivo), rellenamos con ceros hasta completar PAGE_SIZE
-        if len(data) < PAGE_SIZE:
-            data = data.ljust(PAGE_SIZE, b"\x00")
+            return b"\x00" * PAGE_SIZE
+        target_file.seek(offset)
+        self.read_count += 1
+        data = target_file.read(RECORDS_PER_PAGE * RECORD_SIZE)
+        if len(data) < RECORDS_PER_PAGE * RECORD_SIZE:
+            data = data.ljust(RECORDS_PER_PAGE * RECORD_SIZE, b"\x00")
         return data
 
     # 4) lectura del header
@@ -293,14 +292,10 @@ class SeqFile:
 
     # 9) leer un registro en una página
     def _read_record(self, index: int, is_aux: bool) -> Record:
-        # calculamos en qué página está el registro
         page_id = index // RECORDS_PER_PAGE
-        # traemos la página completa a RAM
         page_data = self._read_page(is_aux, page_id)
-        # calculamos la posición relativa del registro dentro de la página
         pos_in_page = (index % RECORDS_PER_PAGE) * RECORD_SIZE
         record_bytes = page_data[pos_in_page: pos_in_page + RECORD_SIZE]
-        # desempaquetamos los datos del registro
         return self._unpack_record(record_bytes)
 
     # 10) escribir un registro en una página
@@ -321,59 +316,75 @@ class SeqFile:
 
     # 11) búsqueda binaria
     def binary_search(self, id_key: int) -> Tuple[Optional[Record], int]:
-        cant_prin, _, _, _ = self._read_header() # leemos el header
-        # "binary search" = buscamos el registro en la zona principal/ordenada
+        """
+        Busca id_key en el archivo principal ordenado.
+        Retorna (record, idx) si lo encuentra exacto, o (None, last_menor_idx) si no.
+        Ignora registros borrados (id == -1) moviéndose hacia la izquierda,
+        pero solo cuando el borrado está en la posición exacta del mid.
+        Para evitar falsos negativos, si mid tiene id=-1 buscamos en ambas
+        direcciones usando el predecesor más cercano.
+        """
+        cant_prin, _, _, _ = self._read_header()
         inicio = 0
         fin = cant_prin - 1
         last_seen_idx = -1
-        # mientras nos encontramos en la zona ordenada
-        while (inicio <= fin):
-            # calculamos la mitad del intervalo
+        while inicio <= fin:
             mitad = (inicio + fin) // 2
-            # leemos el registro de la mitad
             mid_record = self._read_record(mitad, is_aux=False)
-            # lógica de comparación
-            if mid_record.id == id_key: # si encontramos el registro
-                return mid_record, mitad # lo devolvemos
-            if mid_record.id < id_key: # si el registro de la mitad es menor que el buscado
-                last_seen_idx = mitad # guardamos el menor más cercano
-                inicio = mitad + 1 # seguimos buscando en la zona de la derecha
-            else: # si el registro de la mitad es mayor que el buscado
-                fin = mitad - 1 # seguimos buscando en la zona de la izquierda
-        return None, last_seen_idx # si no encontramos el registro, devuelve None y last_seen_idx
+            if mid_record.id == id_key:
+                return mid_record, mitad
+            if mid_record.id == -1:
+                # registro borrado: no sabemos la dirección, buscar el vecino izquierdo
+                # para determinar si id_key está a la derecha
+                left = mitad - 1
+                while left >= inicio:
+                    lr = self._read_record(left, is_aux=False)
+                    if lr.id != -1:
+                        break
+                    left -= 1
+                if left >= inicio and self._read_record(left, is_aux=False).id < id_key:
+                    last_seen_idx = left
+                    inicio = mitad + 1
+                else:
+                    fin = mitad - 1
+                continue
+            if mid_record.id < id_key:
+                last_seen_idx = mitad
+                inicio = mitad + 1
+            else:
+                fin = mitad - 1
+        return None, last_seen_idx
 
     # 12) búsqueda
     def search(self, id_key: int) -> Optional[Record]:
         cant_prin, cant_aux, prim_arc, prim_pos = self._read_header()
-        
-        # caso especial: tabla vacía
         if prim_arc == -1:
-            return None
-        
-        # empezamos desde el primer registro lógico de la tabla
-        current_rec = self._read_record(prim_pos, prim_arc == 1)
-        
-        # si el primer registro ya es mayor que el buscado, no existe
-        if current_rec.id > id_key:
-            return None
-        
-        # seguimos la cadena completa desde el principio
-        max_pasos = cant_prin + cant_aux
-        pasos = 0
-        
-        while pasos < max_pasos:
-            if current_rec.id == id_key:
-                return current_rec
-            if current_rec.id > id_key:  # ya nos pasamos, no existe
-                break
-            # si hay siguiente registro, seguimos
-            if current_rec.next_file != -1:
-                current_rec = self._read_record(current_rec.next_pos, current_rec.next_file == 1)
-            else:
-                break  # fin de la cadena
-            pasos += 1
-            
-        return None  # si no encontramos el registro, devuelve None
+            return None  # tabla vacía
+
+        # caso especial: el id buscado es el primero de la cadena lógica
+        first_rec = self._read_record(prim_pos, prim_arc == 1)
+        if first_rec.id == id_key:
+            return first_rec
+
+        # binary search en el archivo principal ordenado
+        res_record, idx = self.binary_search(id_key)
+        if res_record is not None:
+            return res_record  # encontrado directamente
+
+        # si no está en el principal, seguir la cadena desde el predecesor
+        if idx != -1:
+            current_rec = self._read_record(idx, is_aux=False)
+            max_pasos = cant_aux + 1  # solo hay que recorrer el auxiliar
+            pasos = 0
+            while current_rec.next_file != -1 and pasos < max_pasos:
+                next_rec = self._read_record(current_rec.next_pos, current_rec.next_file == 1)
+                if next_rec.id == id_key:
+                    return next_rec
+                if next_rec.id > id_key:
+                    break
+                current_rec = next_rec
+                pasos += 1
+        return None
 
     # 13) insertar un registro
     def add(self, record: Record):
@@ -451,44 +462,47 @@ class SeqFile:
 
     # 14) eliminar un registro
     def remove(self, id_key: int) -> bool:
-        # utilizamos la función search que busca en el principal y en el auxiliar siguiendo el orden lógico
         registro_encontrado = self.search(id_key)
         if registro_encontrado is None:
-            return False # si el registro no existe en la cadena, no hay nada que eliminar
-        # para eliminarlo lógicamente, cambiamos su id a -1
+            return False
+
+        cant_prin, cant_aux, prim_arc, prim_pos = self._read_header()
+
+        # guardar next antes de marcar como borrado
+        next_file_orig = registro_encontrado.next_file
+        next_pos_orig  = registro_encontrado.next_pos
+
+        # marcar como borrado
         registro_encontrado.id = -1
-        # necesitamos saber dónde está físicamente para sobrescribirlo
-        # lo buscamos en el archivo principal con búsqueda binaria
+
+        # buscar posición física en el principal
         res_bin, idx_p = self.binary_search(id_key)
-        # verificamos si la búsqueda binaria nos dio el registro exacto
+
         if res_bin is not None and res_bin.id == id_key:
-            # sobreescribimos con su versión marcada como borrado
+            # está en el principal
             self._write_record(idx_p, is_aux=False, rec=registro_encontrado)
-            return True # confirmamos que la eliminación fue exitosa y salimos
-        # si no estaba en el principal, tiene que estar en el auxiliar
-        # recorremos la cadena desde el inicio usando el header
-        cant_prin, cant_aux, p_arc, p_pos = self._read_header()
-        # inicializamos el rastro con el primer registro que nos indica el header
-        curr_arc = p_arc # curr_arc será 0 si empieza en principal o 1 si empieza en auxiliar
-        curr_pos = p_pos # curr_pos es el índice físico donde está el primer registro
-        # cortamos con max_pasos como techo seguro
+            # si era el primer registro lógico, actualizar el header
+            if prim_arc == 0 and prim_pos == idx_p:
+                self._write_header(cant_prin, cant_aux, next_file_orig, next_pos_orig)
+            return True
+
+        # está en el auxiliar — recorrer la cadena para encontrarlo
+        curr_arc = prim_arc
+        curr_pos = prim_pos
         max_pasos = cant_prin + cant_aux
         pasos = 0
         while curr_arc != -1 and pasos < max_pasos:
-            # leemos el registro de la posición actual (is_aux es true si curr_arc es 1)
             rec = self._read_record(curr_pos, is_aux=(curr_arc == 1))
-            # comparamos si el registro que tenemos es el que queremos eliminar
             if rec.id == id_key:
-                # si lo encontramos, lo sobreescribimos con su versión marcada como borrado
                 self._write_record(curr_pos, is_aux=(curr_arc == 1), rec=registro_encontrado)
-                return True  # confirmamos que la eliminación fue exitosa y salimos
-            # si no es el buscado, leemos sus punteros para saltar al siguiente registro
-            # actualizamos el archivo (principal o auxiliar) para la siguiente iteración
+                # si era el primer registro lógico, actualizar el header
+                if curr_arc == prim_arc and curr_pos == prim_pos:
+                    self._write_header(cant_prin, cant_aux, next_file_orig, next_pos_orig)
+                return True
             curr_arc = rec.next_file
-            # actualizamos la posición física para la siguiente iteración
             curr_pos = rec.next_pos
             pasos += 1
-        return False  # si el registro no existe físicamente, retorna False
+        return False
 
     # 15) búsqueda por rango
     def range_search(self, begin: int, end: int) -> List[Record]:

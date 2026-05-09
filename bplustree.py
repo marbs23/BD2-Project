@@ -418,7 +418,7 @@ class BPlusTree:
 
     def get_stats(self, last_op_time: float = 0):
         return {
-            "tiempo de ejecución (ms)": last_op_time,
+            "ms": last_op_time,
             "reads":    self.read_count,
             "writes":   self.write_count,
             "total_io": self.read_count + self.write_count,

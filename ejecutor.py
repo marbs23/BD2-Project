@@ -5,15 +5,11 @@ Capa que conecta el parser SQL con los 4 índices del proyecto.
 
 Flujo:
   SQL -> Scanner -> Parser -> AST -> Ejecutor -> Índice (BPT/Seq/Hash/RTree)
-
-Diferencia respecto a la versión inicial: los imports del RTree fueron
-corregidos para apuntar al módulo real (`rtree.rtree`, `rtree.page_store`,
-`rtree.geometry`) que vive en este repositorio. También se ajustó la firma
-de `PageStore` para incluir el `IOStats` requerido.
 """
 
 import os
 import time
+import csv as _csv
 from typing import Any, Dict, List, Optional
 
 from parser_sql import (
@@ -28,7 +24,7 @@ from parser_sql import (
     NodoDelete,
 )
 
-# ── índices ─────────────────────────────────────────────────────────────
+# ── índices ──────────────────────────────────────────────────────────────────
 try:
     from bplustree import BPlusTree, Record as RecordBPT
     BPTREE_OK = True
@@ -55,21 +51,25 @@ try:
 except ImportError:
     RTREE_OK = False
 
-
 TECNICAS_VALIDAS = {"BPTREE", "SEQUENTIAL", "HASH", "RTREE"}
 
+# aliases para detectar columnas de coordenadas en CSVs del RTree
+_LON_ALIASES = {"lon", "longitude", "longitud", "x"}
+_LAT_ALIASES = {"lat", "latitude", "latitud", "y"}
 
+
+# ── resultado ────────────────────────────────────────────────────────────────
 class ResultadoEjecucion:
     def __init__(self, operacion: str, tabla: str):
         self.operacion = operacion
-        self.tabla = tabla
+        self.tabla     = tabla
         self.registros: List[Any] = []
-        self.afectados: int = 0
-        self.ok: bool = True
-        self.mensaje: str = ""
+        self.afectados: int  = 0
+        self.ok:        bool = True
+        self.mensaje:   str  = ""
         self.tiempo_ms: float = 0.0
-        self.reads: int = 0
-        self.writes: int = 0
+        self.reads:     int  = 0
+        self.writes:    int  = 0
 
     @property
     def total_io(self) -> int:
@@ -85,37 +85,33 @@ class ResultadoEjecucion:
                 f"tiempo={self.tiempo_ms:.2f}ms")
 
 
+# ── ejecutor ─────────────────────────────────────────────────────────────────
 class Ejecutor:
     def __init__(self, directorio: str = "."):
         self.directorio = directorio
         self._catalogo: Dict[str, dict] = {}
 
-    # ── API pública ─────────────────────────────────────────────────────
+    # ── API pública ──────────────────────────────────────────────────────────
     def ejecutar(self, sql: str) -> List[ResultadoEjecucion]:
         try:
             programa = parsear(sql)
-            print(f"SQL parseado exitosamente: {len(programa.sentencias)} sentencia(s) encontradas.")
-            print(f"Árbol de sintaxis abstracta (AST): {programa}")
         except SyntaxError as e:
             r = ResultadoEjecucion("PARSE_ERROR", "")
             r.ok = False
             r.mensaje = str(e)
             return [r]
-
-        print(programa.sentencias)
         return [self._dispatch(n) for n in programa.sentencias]
 
     def tablas(self) -> List[str]:
         return list(self._catalogo.keys())
 
     def info_tabla(self, nombre: str) -> Optional[dict]:
-        #print("catalogo", self._catalogo)
         info = self._catalogo.get(nombre)
         if not info:
             return None
         return {
-            "tabla": nombre,
-            "tecnica": info["tecnica"],
+            "tabla":    nombre,
+            "tecnica":  info["tecnica"],
             "col_clave": info["col_clave"],
             "columnas": [(c.nombre, c.tipo) for c in info["columnas"]],
         }
@@ -127,7 +123,7 @@ class Ejecutor:
             except Exception:
                 pass
 
-    # ── dispatcher ──────────────────────────────────────────────────────
+    # ── dispatcher ───────────────────────────────────────────────────────────
     def _dispatch(self, nodo) -> ResultadoEjecucion:
         if isinstance(nodo, NodoCreateTable):   return self._crear_tabla(nodo)
         if isinstance(nodo, NodoSelectTodos):   return self._select_todos(nodo)
@@ -142,43 +138,35 @@ class Ejecutor:
         r.mensaje = f"Tipo de nodo no soportado: {type(nodo)}"
         return r
 
-    # ── CREATE ──────────────────────────────────────────────────────────
-    def crear_tabla_desde_archivo(self, table_name: str, columns: Dict[str, str], file_path: str, tecnica: str = "BPTREE") -> ResultadoEjecucion:
-        """
-        Crea una tabla y carga datos desde un archivo CSV.
-        Delega en _crear_tabla construyendo un NodoCreateTable sintético.
-        """
-        from parser_sql import NodoColumna, NodoCreateTable
-        r = ResultadoEjecucion("CREATE TABLE FROM FILE", table_name)
+    # ── CREATE TABLE ─────────────────────────────────────────────────────────
+    def crear_tabla_desde_archivo(self, table_name: str, columns: Dict[str, str],
+                                   file_path: str, tecnica: str = "BPTREE") -> ResultadoEjecucion:
+        """Helper para crear tabla desde código Python (sin SQL)."""
+        from parser_sql import NodoColumna, NodoCreateTable as NCT
         t0 = time.time()
-        try:
-            cols = []
-            for i, (nombre, tipo) in enumerate(columns.items()):
-                idx = tecnica.upper() if i == 0 else None
-                cols.append(NodoColumna(nombre=nombre, tipo=tipo, indice=idx))
-            nodo = NodoCreateTable(tabla=table_name, columnas=cols, archivo=file_path)
-
-            r = self._crear_tabla(nodo)
-        except Exception as e:
-            r.ok = False
-            r.mensaje = f"Error creando tabla desde archivo: {e}"
+        cols = []
+        for i, (nombre, tipo) in enumerate(columns.items()):
+            idx = tecnica.upper() if i == 0 else None
+            cols.append(NodoColumna(nombre=nombre, tipo=tipo, indice=idx))
+        nodo = NCT(tabla=table_name, columnas=cols, archivo=file_path)
+        r = self._crear_tabla(nodo)
         r.tiempo_ms = (time.time() - t0) * 1000
         return r
-    
-    def _crear_tabla(self, nodo: NodoCreateTable) -> ResultadoEjecucion:
-        r = ResultadoEjecucion("CREATE TABLE", nodo.tabla)
 
+    def _crear_tabla(self, nodo: NodoCreateTable) -> ResultadoEjecucion:
+        r  = ResultadoEjecucion("CREATE TABLE", nodo.tabla)
         t0 = time.time()
 
+        # determinar técnica y columna clave
         col_clave = None
-        tecnica = None
+        tecnica   = None
         for col in nodo.columnas:
             if col.indice is not None:
                 col_clave = col.nombre
-                tecnica = col.indice.upper()
+                tecnica   = col.indice.upper()
                 break
         if tecnica is None:
-            tecnica = "BPTREE"
+            tecnica   = "BPTREE"
             col_clave = nodo.columnas[0].nombre
 
         if tecnica not in TECNICAS_VALIDAS:
@@ -198,57 +186,46 @@ class Ejecutor:
             if tecnica == "BPTREE":
                 indice = (BPlusTree.from_csv(f"{base}_bpt.bin", nodo.archivo)
                           if nodo.archivo else BPlusTree(f"{base}_bpt.bin"))
+
             elif tecnica == "SEQUENTIAL":
                 indice = (SeqFile.from_csv(f"{base}_seq.bin", nodo.archivo)
                           if nodo.archivo else SeqFile(f"{base}_seq.bin"))
+
             elif tecnica == "HASH":
                 indice = (ExtendibleHashFile.from_csv(
-                            f"{base}_hash.bin", f"{base}_hash.json", nodo.archivo)
+                              f"{base}_hash.bin", f"{base}_hash.json", nodo.archivo)
                           if nodo.archivo
                           else ExtendibleHashFile(f"{base}_hash.bin", f"{base}_hash.json"))
+
             else:  # RTREE
-                store = PageStore(f"{base}_rtree.bin", IOStats())
+                store  = PageStore(f"{base}_rtree.bin", IOStats())
                 indice = RTree(store)
                 if nodo.archivo:
-                    # Detectar columnas de coordenadas en el CSV.
-                    # Convención: lon_col y lat_col se infieren del header del CSV.
-                    # Soporta: lon/lat, longitude/latitude, x/y, longitud/latitud.
-                    import csv as _csv
-                    _lon_aliases = {"lon", "longitude", "longitud", "x"}
-                    _lat_aliases = {"lat", "latitude", "latitud", "y"}
+                    # detectar columnas lon/lat en el header del CSV
                     with open(nodo.archivo, newline="", encoding="utf-8") as _f:
-                        _header = next(_csv.reader(_f))
-                    _header_lower = [c.strip().lower() for c in _header]
-                    _lon_col = next(
-                        (c for c in _header_lower if c in _lon_aliases), None
-                    )
-                    _lat_col = next(
-                        (c for c in _header_lower if c in _lat_aliases), None
-                    )
-                    if _lon_col is None or _lat_col is None:
+                        header = next(_csv.reader(_f))
+                    header_lower = [c.strip().lower() for c in header]
+                    lon_col = next((c for c in header_lower if c in _LON_ALIASES), None)
+                    lat_col = next((c for c in header_lower if c in _LAT_ALIASES), None)
+                    if lon_col is None or lat_col is None:
                         r.ok = False
                         r.mensaje = (
-                            f"El CSV '{nodo.archivo}' no tiene columnas de coordenadas. "
-                            f"Se esperan columnas llamadas lon/longitude/longitud/x y "
-                            f"lat/latitude/latitud/y. Columnas encontradas: {_header}"
+                            f"CSV '{nodo.archivo}' sin columnas de coordenadas. "
+                            f"Se esperan: {_LON_ALIASES} y {_LAT_ALIASES}. "
+                            f"Encontradas: {header}"
                         )
                         return r
-                    indice.bulk_load_from_csv(
-                        nodo.archivo, lon_col=_lon_col, lat_col=_lat_col
-                    )
+                    indice.bulk_load_from_csv(nodo.archivo,
+                                              lon_col=lon_col, lat_col=lat_col)
 
-            print(f"Índice '{nodo.tabla}' creado exitosamente con técnica '{tecnica}'.")
-    
         except Exception as e:
             r.ok = False
             r.mensaje = f"Error creando índice: {e}"
             return r
 
-        print(f"Índice '{nodo.tabla}' creado exitosamente con técnica '{tecnica}' 2.")
-
         self._catalogo[nodo.tabla] = {
-            "indice": indice,
-            "tecnica": tecnica,
+            "indice":   indice,
+            "tecnica":  tecnica,
             "columnas": nodo.columnas,
             "col_clave": col_clave,
         }
@@ -258,13 +235,13 @@ class Ejecutor:
                      + (f" cargando '{nodo.archivo}'" if nodo.archivo else ""))
         return r
 
-    # ── SELECT todos (sin WHERE) ─────────────────────────────────────────
-    def _select_todos(self, nodo: "NodoSelectTodos") -> ResultadoEjecucion:
-        r = ResultadoEjecucion("SELECT ALL", nodo.tabla)
+    # ── SELECT * (sin WHERE) ─────────────────────────────────────────────────
+    def _select_todos(self, nodo: NodoSelectTodos) -> ResultadoEjecucion:
+        r    = ResultadoEjecucion("SELECT ALL", nodo.tabla)
         info = self._verif(nodo.tabla, r)
         if info is None:
             return r
-        indice = info["indice"]
+        indice  = info["indice"]
         tecnica = info["tecnica"]
         t0 = time.time()
         self._reset(indice)
@@ -277,7 +254,6 @@ class Ejecutor:
                 r.ok = False
                 r.mensaje = "SELECT * sin WHERE no soportado en ExtendibleHash"
                 return r
-            # BPTree y Sequential soportan range_search con rango máximo
             registros = indice.range_search(0, 2**31 - 1)
             if nodo.limite is not None:
                 registros = registros[:nodo.limite]
@@ -289,14 +265,13 @@ class Ejecutor:
         self._stats(r, indice)
         return r
 
-    # ── SELECT puntual ──────────────────────────────────────────────────
+    # ── SELECT puntual ───────────────────────────────────────────────────────
     def _select_puntual(self, nodo: NodoSelectPuntual) -> ResultadoEjecucion:
-        r = ResultadoEjecucion("SELECT", nodo.tabla)
+        r    = ResultadoEjecucion("SELECT", nodo.tabla)
         info = self._verif(nodo.tabla, r)
         if info is None:
             return r
-
-        indice = info["indice"]
+        indice  = info["indice"]
         tecnica = info["tecnica"]
         t0 = time.time()
         self._reset(indice)
@@ -316,9 +291,9 @@ class Ejecutor:
             r.mensaje = f"No se encontró '{nodo.valor}' en {nodo.tabla}"
         return r
 
-    # ── SELECT BETWEEN ──────────────────────────────────────────────────
+    # ── SELECT BETWEEN ───────────────────────────────────────────────────────
     def _select_rango(self, nodo: NodoSelectRango) -> ResultadoEjecucion:
-        r = ResultadoEjecucion("SELECT BETWEEN", nodo.tabla)
+        r    = ResultadoEjecucion("SELECT BETWEEN", nodo.tabla)
         info = self._verif(nodo.tabla, r)
         if info is None:
             return r
@@ -331,7 +306,6 @@ class Ejecutor:
             r.ok = False
             r.mensaje = "Para RTree usa POINT+RADIUS"
             return r
-
         indice = info["indice"]
         t0 = time.time()
         self._reset(indice)
@@ -344,9 +318,9 @@ class Ejecutor:
         self._stats(r, indice)
         return r
 
-    # ── SELECT RADIUS ───────────────────────────────────────────────────
+    # ── SELECT RADIUS ────────────────────────────────────────────────────────
     def _select_radio(self, nodo: NodoSelectRadio) -> ResultadoEjecucion:
-        r = ResultadoEjecucion("SELECT RADIUS", nodo.tabla)
+        r    = ResultadoEjecucion("SELECT RADIUS", nodo.tabla)
         info = self._verif(nodo.tabla, r)
         if info is None:
             return r
@@ -359,7 +333,7 @@ class Ejecutor:
         try:
             res = indice.range_search(nodo.x, nodo.y, nodo.radio)
             r.registros = list(getattr(res, "tids", res))
-            r.reads = getattr(res, "io_reads", 0)
+            r.reads  = getattr(res, "io_reads",  0)
             r.writes = getattr(res, "io_writes", 0)
         except Exception as e:
             r.ok = False
@@ -367,9 +341,9 @@ class Ejecutor:
         r.tiempo_ms = (time.time() - t0) * 1000
         return r
 
-    # ── SELECT KNN ──────────────────────────────────────────────────────
+    # ── SELECT KNN ───────────────────────────────────────────────────────────
     def _select_knn(self, nodo: NodoSelectKNN) -> ResultadoEjecucion:
-        r = ResultadoEjecucion("SELECT KNN", nodo.tabla)
+        r    = ResultadoEjecucion("SELECT KNN", nodo.tabla)
         info = self._verif(nodo.tabla, r)
         if info is None:
             return r
@@ -382,7 +356,7 @@ class Ejecutor:
         try:
             res = indice.knn(nodo.x, nodo.y, nodo.k)
             r.registros = list(getattr(res, "tids", res))
-            r.reads = getattr(res, "io_reads", 0)
+            r.reads  = getattr(res, "io_reads",  0)
             r.writes = getattr(res, "io_writes", 0)
         except Exception as e:
             r.ok = False
@@ -390,49 +364,46 @@ class Ejecutor:
         r.tiempo_ms = (time.time() - t0) * 1000
         return r
 
-    # ── INSERT ──────────────────────────────────────────────────────────
+    # ── INSERT ───────────────────────────────────────────────────────────────
     def _insertar(self, nodo: NodoInsert) -> ResultadoEjecucion:
-        r = ResultadoEjecucion("INSERT", nodo.tabla)
+        r    = ResultadoEjecucion("INSERT", nodo.tabla)
         info = self._verif(nodo.tabla, r)
         if info is None:
             return r
-        indice = info["indice"]
+        indice  = info["indice"]
         tecnica = info["tecnica"]
-        vals = nodo.valores
+        vals    = nodo.valores
         t0 = time.time()
         self._reset(indice)
         try:
             if tecnica == "RTREE":
-                lon = float(vals[0])
-                lat = float(vals[1])
-                pid = int(vals[2]) if len(vals) > 2 else 0
+                lon  = float(vals[0])
+                lat  = float(vals[1])
+                pid  = int(vals[2]) if len(vals) > 2 else 0
                 slot = int(vals[3]) if len(vals) > 3 else 0
                 indice.insert(lon, lat, TID(pid, slot))
             else:
                 rec = self._build_record(vals, tecnica)
                 if rec is None:
                     r.ok = False
-                    r.mensaje = f"No se pudo construir el registro {vals}"
+                    r.mensaje = f"No se pudo construir el registro con valores {vals}"
                     return r
                 if tecnica in ("BPTREE", "SEQUENTIAL"):
                     indice.add(rec)
                 else:  # HASH
                     indice.insert(rec)
             r.afectados = 1
-            r.mensaje = f"Registro insertado en '{nodo.tabla}'"
-
-            print(f"Registro insertado en '{nodo.tabla}': {vals}")
+            r.mensaje   = f"Registro insertado en '{nodo.tabla}'"
         except Exception as e:
-            print(f"Error al insertar registro en '{nodo.tabla}': {vals}")
             r.ok = False
             r.mensaje = str(e)
         r.tiempo_ms = (time.time() - t0) * 1000
         self._stats(r, indice)
         return r
 
-    # ── DELETE ──────────────────────────────────────────────────────────
+    # ── DELETE ───────────────────────────────────────────────────────────────
     def _eliminar(self, nodo: NodoDelete) -> ResultadoEjecucion:
-        r = ResultadoEjecucion("DELETE", nodo.tabla)
+        r    = ResultadoEjecucion("DELETE", nodo.tabla)
         info = self._verif(nodo.tabla, r)
         if info is None:
             return r
@@ -446,7 +417,7 @@ class Ejecutor:
         try:
             ok = indice.remove(nodo.valor)
             r.afectados = 1 if ok else 0
-            r.ok = ok
+            r.ok      = ok
             r.mensaje = (f"Registro {nodo.valor} eliminado" if ok
                          else f"Registro {nodo.valor} no encontrado")
         except Exception as e:
@@ -456,11 +427,8 @@ class Ejecutor:
         self._stats(r, indice)
         return r
 
-    # ── helpers ─────────────────────────────────────────────────────────
+    # ── helpers ──────────────────────────────────────────────────────────────
     def _verif(self, nombre: str, r: ResultadoEjecucion):
-        # es temporal    
-        nombre = nombre.replace("_bpt", "")
-        
         if nombre not in self._catalogo:
             r.ok = False
             r.mensaje = f"Tabla '{nombre}' no existe."
@@ -469,12 +437,12 @@ class Ejecutor:
 
     def _build_record(self, vals: list, tecnica: str):
         try:
-            id_ = int(vals[0])
-            title = str(vals[1]) if len(vals) > 1 else ""
+            id_    = int(vals[0])
+            title  = str(vals[1]) if len(vals) > 1 else ""
             author = str(vals[2]) if len(vals) > 2 else ""
-            pages = int(vals[3]) if len(vals) > 3 else 0
-            rating = float(vals[4]) if len(vals) > 4 else 0.0
-            year = int(vals[5]) if len(vals) > 5 else 0
+            pages  = int(float(vals[3]))  if len(vals) > 3 else 0
+            rating = float(vals[4])       if len(vals) > 4 else 0.0
+            year   = int(float(vals[5]))  if len(vals) > 5 else 0
             if tecnica == "BPTREE":
                 return RecordBPT(id=id_, title=title, author=author,
                                  pages=pages, rating=rating, year=year)
@@ -495,45 +463,45 @@ class Ejecutor:
             indice.reset_counters()
 
     def _stats(self, r: ResultadoEjecucion, indice) -> None:
+        # BPlusTree / SeqFile → get_stats()
         if hasattr(indice, "get_stats"):
             try:
                 s = indice.get_stats()
-                r.reads = s.get("reads", 0)
+                r.reads  = s.get("reads",  0)
                 r.writes = s.get("writes", 0)
-                # Para BPlusTree, obtener el número de registros del header
                 if hasattr(indice, "_read_header"):
-                    root_page, total_pages, height, total_records = indice._read_header()
-                    r.afectados = total_records
+                    _, _, _, total = indice._read_header()
+                    r.afectados = total
                 return
             except Exception:
                 pass
-        # Para R-Tree, usar las estadísticas del store
+        # RTree → stats.snapshot()
         if hasattr(indice, "stats") and hasattr(indice.stats, "snapshot"):
             try:
-                snapshot = indice.stats.snapshot()
-                r.reads = snapshot.reads
-                r.writes = snapshot.writes
+                snap = indice.stats.snapshot()
+                r.reads  = snap.reads
+                r.writes = snap.writes
                 return
             except Exception:
                 pass
+        # ExtendibleHash → disk_reads / disk_writes
         if hasattr(indice, "disk_reads"):
-            r.reads = indice.disk_reads
+            r.reads  = indice.disk_reads
             r.writes = indice.disk_writes
 
 
-# ── demo CLI ────────────────────────────────────────────────────────────
+# ── demo CLI ─────────────────────────────────────────────────────────────────
 def _print(rs):
     for r in rs:
-        ok = "✓" if r.ok else "✗"
-        print(f"  {ok} [{r.operacion}] tabla='{r.tabla}' "
+        sym = "✓" if r.ok else "✗"
+        print(f"  {sym} [{r.operacion}] tabla='{r.tabla}' "
               f"filas={len(r.registros)} io={r.total_io} "
               f"afectados={r.afectados} t={r.tiempo_ms:.2f}ms  msg={r.mensaje}")
 
 
 if __name__ == "__main__":
     for f in ["demo_books_bpt.bin"]:
-        if os.path.exists(f):
-            os.remove(f)
+        if os.path.exists(f): os.remove(f)
 
     db = Ejecutor(".")
     print("▶ CREATE")
@@ -561,5 +529,4 @@ if __name__ == "__main__":
 
     db.cerrar_todo()
     for f in ["demo_books_bpt.bin"]:
-        if os.path.exists(f):
-            os.remove(f)
+        if os.path.exists(f): os.remove(f)

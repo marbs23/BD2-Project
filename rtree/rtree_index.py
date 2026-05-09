@@ -610,22 +610,99 @@ class RTree:
     def bulk_load_from_csv(self, path: str, lon_col: str, lat_col: str,
                             data_page_id: int = 1, delimiter: str = ",",
                             skip_invalid: bool = True) -> int:
-        import csv
-        n = 0
+        """
+        Carga masiva desde CSV usando STR (Sort-Tile-Recursive).
+        Construye el árbol de abajo hacia arriba en memoria y escribe todo de una vez.
+        O(n log n) con I/O mínimo — mucho más rápido que insertar punto a punto.
+        """
+        import csv as _csv
+        import math
+
+        # 1. Leer todos los puntos en RAM
+        points = []
         with open(path, newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f, delimiter=delimiter)
+            reader = _csv.DictReader(f, delimiter=delimiter)
             if lon_col not in reader.fieldnames or lat_col not in reader.fieldnames:
                 raise ValueError(f"CSV missing columns: {lon_col}, {lat_col}")
             for slot, row in enumerate(reader):
                 try:
                     lon = float(row[lon_col])
                     lat = float(row[lat_col])
+                    points.append((lon, lat, data_page_id + slot // 65535, slot % 65535))
                 except (TypeError, ValueError):
                     if skip_invalid:
                         continue
                     raise
-                self.insert(lon, lat, TID(data_page_id, slot))
-                n += 1
+
+        n = len(points)
+        if n == 0:
+            return 0
+
+        # 2. STR sort: franjas por lon, dentro de cada franja ordenar por lat
+        num_leaves = math.ceil(n / M)
+        num_slices = max(1, math.ceil(math.sqrt(num_leaves)))
+        points.sort(key=lambda p: p[0])
+        slice_size = num_slices * M
+        sorted_pts = []
+        for i in range(0, n, slice_size):
+            chunk = points[i:i + slice_size]
+            chunk.sort(key=lambda p: p[1])
+            sorted_pts.extend(chunk)
+
+        # 3. Construir árbol bottom-up
+        # Cada nivel es una lista de (RTreeNode, page_id)
+        # Empezamos con las hojas
+        def make_leaves():
+            nodes = []
+            for i in range(0, len(sorted_pts), M):
+                batch = sorted_pts[i:i + M]
+                pid = self.store.allocate_page()
+                node = RTreeNode(pid, is_leaf=True, level=0, parent_pid=0)
+                for lon, lat, dp, slot in batch:
+                    node.entries.append({
+                        "mbr": MBR.from_point(lon, lat),
+                        "tid_page": dp,
+                        "tid_slot": slot,
+                    })
+                nodes.append(node)
+            return nodes
+
+        def make_internal_level(children: list, level: int) -> list:
+            nodes = []
+            for i in range(0, len(children), M):
+                batch = children[i:i + M]
+                pid = self.store.allocate_page()
+                node = RTreeNode(pid, is_leaf=False, level=level, parent_pid=0)
+                for child in batch:
+                    child.parent_pid = pid
+                    node.entries.append({
+                        "mbr": child.get_mbr(),
+                        "child_pid": child.page_id,
+                    })
+                nodes.append(node)
+            return nodes
+
+        current = make_leaves()
+        level = 1
+        all_nodes = list(current)
+        while len(current) > 1:
+            current = make_internal_level(current, level)
+            all_nodes.extend(current)
+            level += 1
+
+        root = current[0]
+        root.parent_pid = 0
+
+        # 4. Escribir todos los nodos a disco
+        for node in all_nodes:
+            self.store.write_page(node.page_id, node.serialize())
+
+        # 5. Actualizar la raíz en el superbloque
+        old_root = self.store.get_root()
+        self.store.unpin_page(old_root)
+        self.store.set_root(root.page_id)
+        self.store.pin_page(root.page_id)
+
         return n
 
     def validate_structure(self) -> dict:

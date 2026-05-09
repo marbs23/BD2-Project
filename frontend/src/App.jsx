@@ -22,9 +22,6 @@ import TableSidebar from './components/TableInfo';
 
 // ── Componente de visualización R-Tree ────────────────────────────────────────
 const RTreeViewer = ({ rtreeQuery, rtreePoints, rtreeTables, onLoadPoints }) => {
-  console.log("RTreeViewer render", { rtreeQuery, rtreePoints, rtreeTables });
-
-
   const canvasRef = React.useRef(null);
   const [selectedTable, setSelectedTable] = React.useState('');
 
@@ -98,22 +95,29 @@ const RTreeViewer = ({ rtreeQuery, rtreePoints, rtreeTables, onLoadPoints }) => 
     if (rtreeQuery?.radius != null) {
       const cx = toX(rtreeQuery.lon);
       const cy = toY(rtreeQuery.lat);
-      // Radio en unidades de pantalla (aproximado)
-      const rPx = (rtreeQuery.radius / (maxLon - minLon)) * (W - 2 * PAD);
+      // Radio en unidades de pantalla (mejorado para coordenadas geográficas)
+      // Usar el promedio del rango de lon y lat para mejor escala
+      const lonRange = maxLon - minLon;
+      const latRange = maxLat - minLat;
+      const avgRange = (lonRange + latRange) / 2;
+      
+      // Radio mínimo visible de 10px, escalado según el radio real
+      const rPx = Math.max(10, (rtreeQuery.radius / avgRange) * (W - 2 * PAD));
+      
       ctx.beginPath();
       ctx.arc(cx, cy, rPx, 0, 2 * Math.PI);
-      ctx.strokeStyle = 'rgba(139,92,246,0.5)';
-      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = 'rgba(139,92,246,0.8)';
+      ctx.lineWidth = 2;
       ctx.stroke();
-      ctx.fillStyle = 'rgba(139,92,246,0.08)';
+      ctx.fillStyle = 'rgba(139,92,246,0.15)';
       ctx.fill();
     }
 
-    // Puntos del índice (gris)
+    // Puntos del índice (azul claro más visible)
     allPoints.forEach(p => {
       ctx.beginPath();
       ctx.arc(toX(p.lon), toY(p.lat), 3, 0, 2 * Math.PI);
-      ctx.fillStyle = '#334155';
+      ctx.fillStyle = 'rgba(129, 140, 248, 0.6)'; // Un azul claro más visible
       ctx.fill();
     });
 
@@ -307,11 +311,19 @@ const BenchmarkPanel = ({ queryHistory }) => {
   const [activeOp, setActiveOp]   = useState('insert');
   const [activeMetric, setActiveMetric] = useState('ms');
 
-  const TECNICAS = ['BPTREE', 'SEQUENTIAL', 'HASH', 'RTREE'];
-  const COLORS   = { BPTREE: '#6366f1', SEQUENTIAL: '#10b981', HASH: '#f59e0b', RTREE: '#a855f7' };
-  const LABELS   = { BPTREE: 'B+ Tree', SEQUENTIAL: 'Sequential', HASH: 'Ext. Hash', RTREE: 'R-Tree' };
-  const OPS      = ['insert', 'search', 'range'];
-  const OP_LABELS = { insert: 'Inserción', search: 'Búsqueda puntual', range: 'Búsqueda por rango' };
+  // Índices tradicionales (BPTREE, HASH, SEQUENTIAL)
+  const TRADITIONAL_TECNICAS = ['BPTREE', 'SEQUENTIAL', 'HASH'];
+  const TRADITIONAL_COLORS   = { BPTREE: '#6366f1', SEQUENTIAL: '#10b981', HASH: '#f59e0b' };
+  const TRADITIONAL_LABELS   = { BPTREE: 'B+ Tree', SEQUENTIAL: 'Sequential', HASH: 'Ext. Hash' };
+  const TRADITIONAL_OPS      = ['insert', 'search', 'range'];
+  const TRADITIONAL_OP_LABELS = { insert: 'Inserción', search: 'Búsqueda puntual', range: 'Búsqueda por rango' };
+
+  // Índices espaciales (RTREE)
+  const SPATIAL_TECNICAS = ['RTREE'];
+  const SPATIAL_COLORS   = { RTREE: '#a855f7' };
+  const SPATIAL_LABELS   = { RTREE: 'R-Tree' };
+  const SPATIAL_OPS      = ['insert', 'radius', 'knn'];
+  const SPATIAL_OP_LABELS = { insert: 'Inserción', radius: 'Búsqueda por radio', knn: 'Búsqueda KNN' };
 
   const loadBenchmark = async () => {
     setLoading(true);
@@ -328,13 +340,55 @@ const BenchmarkPanel = ({ queryHistory }) => {
 
   useEffect(() => { loadBenchmark(); }, []);
 
-  // Construir datos para el gráfico de barras agrupadas por técnica
+  // Construir datos para el gráfico de barras por técnica y operación activa
   const chartDataForTecnica = (tecnica) => {
     if (!benchData?.results) return [];
+    // Para RTree, mapear 'search' → 'radius' si activeOp es 'radius'
+    const opKey = (tecnica === 'RTREE' && activeOp === 'radius') ? 'search'
+                : (tecnica === 'RTREE' && activeOp === 'knn')    ? 'knn'
+                : activeOp;
     return (benchData.sizes || []).map(n => {
-      const val = benchData.results[String(n)]?.[tecnica]?.[activeOp]?.[activeMetric];
+      const val = benchData.results[String(n)]?.[tecnica]?.[opKey]?.[activeMetric];
       return { label: n >= 1000 ? `${n/1000}k` : String(n), value: val ?? 0 };
     });
+  };
+
+  const BenchmarkSection = ({ title, tecnicas, colors, labels }) => {
+    return (
+      <div className="space-y-4">
+        <h4 className="text-sm font-bold text-slate-300 border-b border-slate-700 pb-2">
+          {title}
+        </h4>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {tecnicas.map(tec => {
+            const data = chartDataForTecnica(tec);
+            const hasData = data.some(d => d.value > 0);
+            return (
+              <div key={tec} className="bg-[#1e293b] rounded-xl border border-slate-700 p-3">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="w-2 h-2 rounded-full" style={{ background: colors[tec] }} />
+                  <span className="text-xs font-bold text-slate-300">{labels[tec]}</span>
+                  {tec === 'HASH' && activeOp === 'range' && (
+                    <span className="text-[9px] text-yellow-500 bg-yellow-500/10 px-1 rounded">N/A</span>
+                  )}
+                </div>
+                {hasData ? (
+                  <BarChart
+                    data={data}
+                    title={activeMetric === 'ms' ? 'ms' : 'páginas'}
+                    color={colors[tec]}
+                  />
+                ) : (
+                  <div className="h-[200px] flex items-center justify-center text-slate-600 text-xs">
+                    Sin datos
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -367,72 +421,80 @@ const BenchmarkPanel = ({ queryHistory }) => {
         </div>
       ) : (
         <>
-          {/* Selector de operación y métrica */}
-          <div className="flex gap-3 flex-wrap">
-            <div className="flex bg-slate-800 rounded-lg p-1 gap-1">
-              {OPS.map(op => (
-                <button key={op}
-                  onClick={() => setActiveOp(op)}
-                  className={`px-3 py-1 text-xs rounded-md transition-colors font-medium ${
-                    activeOp === op ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  {OP_LABELS[op]}
-                </button>
-              ))}
+          {/* Selectores de operación y métrica */}
+          <div className="space-y-4">
+            {/* Índices Tradicionales */}
+            <div className="flex gap-3 flex-wrap">
+              <div className="flex bg-slate-800 rounded-lg p-1 gap-1">
+                {TRADITIONAL_OPS.map(op => (
+                  <button key={op}
+                    onClick={() => setActiveOp(op)}
+                    className={`px-3 py-1 text-xs rounded-md transition-colors font-medium ${
+                      activeOp === op ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {TRADITIONAL_OP_LABELS[op]}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div className="flex bg-slate-800 rounded-lg p-1 gap-1">
-              <button onClick={() => setActiveMetric('ms')}
-                className={`px-3 py-1 text-xs rounded-md transition-colors font-medium flex items-center gap-1 ${
-                  activeMetric === 'ms' ? 'bg-yellow-600 text-white' : 'text-slate-400 hover:text-white'
-                }`}>
-                <Clock size={10} /> Tiempo (ms)
-              </button>
-              <button onClick={() => setActiveMetric('io')}
-                className={`px-3 py-1 text-xs rounded-md transition-colors font-medium flex items-center gap-1 ${
-                  activeMetric === 'io' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'
-                }`}>
-                <HardDrive size={10} /> Accesos disco
-              </button>
+            
+            {/* Índices Espaciales */}
+            <div className="flex gap-3 flex-wrap">
+              <div className="flex bg-purple-900/30 rounded-lg p-1 gap-1 border border-purple-700/50">
+                {SPATIAL_OPS.map(op => (
+                  <button key={op}
+                    onClick={() => setActiveOp(op)}
+                    className={`px-3 py-1 text-xs rounded-md transition-colors font-medium ${
+                      activeOp === op ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {SPATIAL_OP_LABELS[op]}
+                  </button>
+                ))}
+              </div>
+            </div>
+            
+            {/* Métricas */}
+            <div className="flex gap-3 flex-wrap">
+              <div className="flex bg-slate-800 rounded-lg p-1 gap-1">
+                <button onClick={() => setActiveMetric('ms')}
+                  className={`px-3 py-1 text-xs rounded-md transition-colors font-medium flex items-center gap-1 ${
+                    activeMetric === 'ms' ? 'bg-yellow-600 text-white' : 'text-slate-400 hover:text-white'
+                  }`}>
+                  <Clock size={10} /> Tiempo (ms)
+                </button>
+                <button onClick={() => setActiveMetric('io')}
+                  className={`px-3 py-1 text-xs rounded-md transition-colors font-medium flex items-center gap-1 ${
+                    activeMetric === 'io' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'
+                  }`}>
+                  <HardDrive size={10} /> Accesos disco
+                </button>
+              </div>
             </div>
           </div>
 
-          {/* Gráficos por técnica */}
-          <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
-            {TECNICAS.map(tec => {
-              const data = chartDataForTecnica(tec);
-              const hasData = data.some(d => d.value > 0);
-              return (
-                <div key={tec} className="bg-[#1e293b] rounded-xl border border-slate-700 p-3">
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="w-2 h-2 rounded-full" style={{ background: COLORS[tec] }} />
-                    <span className="text-xs font-bold text-slate-300">{LABELS[tec]}</span>
-                    {tec === 'HASH' && activeOp === 'range' && (
-                      <span className="text-[9px] text-yellow-500 bg-yellow-500/10 px-1 rounded">N/A</span>
-                    )}
-                  </div>
-                  {hasData ? (
-                    <BarChart
-                      data={data}
-                      title={activeMetric === 'ms' ? 'ms' : 'páginas'}
-                      color={COLORS[tec]}
-                      unit={activeMetric === 'ms' ? '' : ''}
-                    />
-                  ) : (
-                    <div className="h-[200px] flex items-center justify-center text-slate-600 text-xs">
-                      Sin datos
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+          {/* Sección de Índices Tradicionales */}
+          <BenchmarkSection
+            title="📊 Índices Tradicionales (B+ Tree, Hash, Sequential)"
+            tecnicas={TRADITIONAL_TECNICAS}
+            colors={TRADITIONAL_COLORS}
+            labels={TRADITIONAL_LABELS}
+          />
+
+          {/* Sección de Índices Espaciales */}
+          <BenchmarkSection
+            title="🗺️ Índices Espaciales (R-Tree)"
+            tecnicas={SPATIAL_TECNICAS}
+            colors={SPATIAL_COLORS}
+            labels={SPATIAL_LABELS}
+          />
 
           {/* Tabla resumen */}
           <div className="bg-[#1e293b] rounded-xl border border-slate-700 overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-700">
               <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
-                Tabla comparativa — {OP_LABELS[activeOp]} — {activeMetric === 'ms' ? 'Tiempo (ms)' : 'Accesos a disco'}
+                Tabla comparativa — {activeOp === 'radius' || activeOp === 'knn' ? SPATIAL_OP_LABELS[activeOp] : TRADITIONAL_OP_LABELS[activeOp]} — {activeMetric === 'ms' ? 'Tiempo (ms)' : 'Accesos a disco'}
               </h4>
             </div>
             <div className="overflow-x-auto">
@@ -448,15 +510,17 @@ const BenchmarkPanel = ({ queryHistory }) => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800">
-                  {TECNICAS.map(tec => (
+                  {[...TRADITIONAL_TECNICAS, ...SPATIAL_TECNICAS].map(tec => (
                     <tr key={tec} className="hover:bg-slate-800/30 transition-colors">
                       <td className="px-4 py-2 font-medium flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full inline-block" style={{ background: COLORS[tec] }} />
-                        {LABELS[tec]}
+                        <span className="w-2 h-2 rounded-full inline-block" style={{ background: tec === 'RTREE' ? SPATIAL_COLORS[tec] : TRADITIONAL_COLORS[tec] }} />
+                        {tec === 'RTREE' ? SPATIAL_LABELS[tec] : TRADITIONAL_LABELS[tec]}
                       </td>
                       {(benchData.sizes || []).map(n => {
                         const val = benchData.results[String(n)]?.[tec]?.[activeOp]?.[activeMetric];
                         const isNA = tec === 'HASH' && activeOp === 'range';
+                        const colors = tec === 'RTREE' ? SPATIAL_COLORS : TRADITIONAL_COLORS;
+                        const labels = tec === 'RTREE' ? SPATIAL_LABELS : TRADITIONAL_LABELS;
                         return (
                           <td key={n} className="px-4 py-2 text-right font-mono">
                             {isNA ? (
@@ -647,7 +711,6 @@ const App = () => {
     try {
       const response = await fetch('http://localhost:8000/api/tables?database_path=.');
       const data = await response.json();
-      console.log('Tablas cargadas:', data);
       if (data.success) {
         const tablesMap = {};
         const rtree = [];
@@ -839,7 +902,6 @@ const App = () => {
       
       if (result.success) {
         showNotification(`Benchmark completado: ${result.summary.successful_operations}/${result.summary.total_operations} operaciones exitosas`);
-        console.log('Benchmark results:', result);
       } else {
         showNotification('Error en benchmark: ' + (result.error || result.message), 'error');
       }
