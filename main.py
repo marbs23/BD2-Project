@@ -3,6 +3,7 @@
 Punto de entrada principal para el backend del BD2 Parser API
 Ejecuta: python main.py
 """
+# terminado
 
 import uvicorn
 import os
