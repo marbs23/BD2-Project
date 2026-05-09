@@ -68,9 +68,9 @@ class BPlusTree:
                         id     = int(row["book_key"]),
                         title  = row["title"],
                         author = row["author"],
-                        pages  = int(row["pages"])           if row["pages"]           else 0,
+                        pages  = int(float(row["pages"]))           if row["pages"]           else 0,
                         rating = float(row["average_rating"]) if row["average_rating"]  else 0.0,
-                        year   = int(row["published_date"])  if row["published_date"]   else 0,
+                        year   = int(float(row["published_date"]))  if row["published_date"]   else 0,
                     )
                     obj.add(rec)
                 except (ValueError, KeyError):

@@ -599,6 +599,14 @@ class RTree:
                 self._reinsert_subtree(e["child_pid"])
         self.store.free_page(pid)
 
+    def get_stats(self):
+        snapshot = self.stats.snapshot()
+        return {
+            "reads": snapshot.reads,
+            "writes": snapshot.writes,
+            "total_io": snapshot.reads + snapshot.writes
+        }
+
     def bulk_load_from_csv(self, path: str, lon_col: str, lat_col: str,
                             data_page_id: int = 1, delimiter: str = ",",
                             skip_invalid: bool = True) -> int:

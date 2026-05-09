@@ -1036,6 +1036,32 @@ async def get_rtree_points(table: str, database_path: str = "."):
         })
 
 
+@app.get("/api/benchmark")
+async def get_benchmark_results():
+    """
+    Devuelve los resultados del último benchmark ejecutado (benchmark_results.json).
+    Si no existe, devuelve un objeto vacío con instrucciones.
+    """
+    results_file = "benchmark_results.json"
+    if not os.path.exists(results_file):
+        return {
+            "success": False,
+            "message": "No hay resultados de benchmark. Ejecuta: python3 benchmark.py",
+            "results": {},
+            "sizes": [],
+        }
+    try:
+        with open(results_file) as f:
+            data = json.load(f)
+        return {"success": True, **data}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={
+            "success": False,
+            "message": "Error leyendo benchmark_results.json",
+            "error": str(e),
+        })
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Manejador global de excepciones"""

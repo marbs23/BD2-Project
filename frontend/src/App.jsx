@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { 
   Search, 
   Plus, 
@@ -12,7 +12,10 @@ import {
   RotateCcw,
   Info,
   ChevronRight,
-  Download
+  Download,
+  BarChart2,
+  Clock,
+  HardDrive,
 } from 'lucide-react';
 
 
@@ -215,6 +218,331 @@ const RTreeViewer = ({ rtreeQuery, rtreePoints, rtreeTables, onLoadPoints }) => 
   );
 };
 
+// ── Mini gráfico de barras en canvas (sin librerías externas) ─────────────────
+const BarChart = ({ data, title, color = '#6366f1', unit = '' }) => {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !data || data.length === 0) return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width;
+    const H = canvas.height;
+    const PAD_L = 52, PAD_R = 12, PAD_T = 28, PAD_B = 36;
+    const chartW = W - PAD_L - PAD_R;
+    const chartH = H - PAD_T - PAD_B;
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(0, 0, W, H);
+
+    const maxVal = Math.max(...data.map(d => d.value), 1);
+    const barW = Math.floor(chartW / data.length * 0.6);
+    const gap  = chartW / data.length;
+
+    // Grid lines
+    ctx.strokeStyle = '#334155';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const y = PAD_T + chartH - (i / 4) * chartH;
+      ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - PAD_R, y); ctx.stroke();
+      ctx.fillStyle = '#64748b';
+      ctx.font = '9px monospace';
+      ctx.textAlign = 'right';
+      const label = ((maxVal * i / 4));
+      ctx.fillText(label >= 1000 ? `${(label/1000).toFixed(1)}k` : label.toFixed(label < 10 ? 1 : 0), PAD_L - 4, y + 3);
+    }
+
+    // Bars
+    data.forEach((d, i) => {
+      const barH = (d.value / maxVal) * chartH;
+      const x = PAD_L + i * gap + (gap - barW) / 2;
+      const y = PAD_T + chartH - barH;
+
+      // Shadow
+      ctx.fillStyle = color + '33';
+      ctx.fillRect(x + 2, y + 2, barW, barH);
+
+      // Bar
+      const grad = ctx.createLinearGradient(x, y, x, y + barH);
+      grad.addColorStop(0, color);
+      grad.addColorStop(1, color + '88');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.roundRect(x, y, barW, barH, [3, 3, 0, 0]);
+      ctx.fill();
+
+      // Value label on top
+      ctx.fillStyle = '#e2e8f0';
+      ctx.font = 'bold 9px monospace';
+      ctx.textAlign = 'center';
+      const vLabel = d.value >= 1000 ? `${(d.value/1000).toFixed(1)}k` : d.value.toFixed(d.value < 10 ? 1 : 0);
+      ctx.fillText(vLabel + unit, x + barW / 2, y - 4);
+
+      // X label
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '9px monospace';
+      ctx.fillText(d.label, x + barW / 2, PAD_T + chartH + 14);
+    });
+
+    // Title
+    ctx.fillStyle = '#cbd5e1';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(title, PAD_L, 16);
+
+  }, [data, title, color, unit]);
+
+  return <canvas ref={canvasRef} width={320} height={200} className="rounded-lg w-full" />;
+};
+
+// ── Panel de Benchmark ────────────────────────────────────────────────────────
+const BenchmarkPanel = ({ queryHistory }) => {
+  const [benchData, setBenchData] = useState(null);
+  const [loading, setLoading]     = useState(false);
+  const [activeOp, setActiveOp]   = useState('insert');
+  const [activeMetric, setActiveMetric] = useState('ms');
+
+  const TECNICAS = ['BPTREE', 'SEQUENTIAL', 'HASH', 'RTREE'];
+  const COLORS   = { BPTREE: '#6366f1', SEQUENTIAL: '#10b981', HASH: '#f59e0b', RTREE: '#a855f7' };
+  const LABELS   = { BPTREE: 'B+ Tree', SEQUENTIAL: 'Sequential', HASH: 'Ext. Hash', RTREE: 'R-Tree' };
+  const OPS      = ['insert', 'search', 'range'];
+  const OP_LABELS = { insert: 'Inserción', search: 'Búsqueda puntual', range: 'Búsqueda por rango' };
+
+  const loadBenchmark = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('http://localhost:8000/api/benchmark');
+      const data = await res.json();
+      setBenchData(data);
+    } catch (e) {
+      setBenchData({ success: false, message: 'No se pudo conectar con el backend.' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { loadBenchmark(); }, []);
+
+  // Construir datos para el gráfico de barras agrupadas por técnica
+  const chartDataForTecnica = (tecnica) => {
+    if (!benchData?.results) return [];
+    return (benchData.sizes || []).map(n => {
+      const val = benchData.results[String(n)]?.[tecnica]?.[activeOp]?.[activeMetric];
+      return { label: n >= 1000 ? `${n/1000}k` : String(n), value: val ?? 0 };
+    });
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <h3 className="text-base font-bold text-slate-200 flex items-center gap-2">
+          <BarChart2 size={18} className="text-indigo-400" />
+          Evaluación Experimental
+        </h3>
+        <button
+          onClick={loadBenchmark}
+          disabled={loading}
+          className="flex items-center gap-2 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-600 text-white text-xs rounded-lg transition-colors"
+        >
+          <RotateCcw size={12} className={loading ? 'animate-spin' : ''} />
+          {loading ? 'Cargando...' : 'Actualizar'}
+        </button>
+      </div>
+
+      {!benchData?.success ? (
+        <div className="bg-[#1e293b] rounded-xl border border-slate-700 p-6 text-center">
+          <BarChart2 size={40} className="mx-auto mb-3 text-slate-600" />
+          <p className="text-slate-400 text-sm mb-2">
+            {benchData?.message || 'No hay datos de benchmark disponibles.'}
+          </p>
+          <p className="text-slate-500 text-xs font-mono bg-slate-800 inline-block px-3 py-1 rounded">
+            python3 benchmark.py
+          </p>
+        </div>
+      ) : (
+        <>
+          {/* Selector de operación y métrica */}
+          <div className="flex gap-3 flex-wrap">
+            <div className="flex bg-slate-800 rounded-lg p-1 gap-1">
+              {OPS.map(op => (
+                <button key={op}
+                  onClick={() => setActiveOp(op)}
+                  className={`px-3 py-1 text-xs rounded-md transition-colors font-medium ${
+                    activeOp === op ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  {OP_LABELS[op]}
+                </button>
+              ))}
+            </div>
+            <div className="flex bg-slate-800 rounded-lg p-1 gap-1">
+              <button onClick={() => setActiveMetric('ms')}
+                className={`px-3 py-1 text-xs rounded-md transition-colors font-medium flex items-center gap-1 ${
+                  activeMetric === 'ms' ? 'bg-yellow-600 text-white' : 'text-slate-400 hover:text-white'
+                }`}>
+                <Clock size={10} /> Tiempo (ms)
+              </button>
+              <button onClick={() => setActiveMetric('io')}
+                className={`px-3 py-1 text-xs rounded-md transition-colors font-medium flex items-center gap-1 ${
+                  activeMetric === 'io' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'
+                }`}>
+                <HardDrive size={10} /> Accesos disco
+              </button>
+            </div>
+          </div>
+
+          {/* Gráficos por técnica */}
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
+            {TECNICAS.map(tec => {
+              const data = chartDataForTecnica(tec);
+              const hasData = data.some(d => d.value > 0);
+              return (
+                <div key={tec} className="bg-[#1e293b] rounded-xl border border-slate-700 p-3">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="w-2 h-2 rounded-full" style={{ background: COLORS[tec] }} />
+                    <span className="text-xs font-bold text-slate-300">{LABELS[tec]}</span>
+                    {tec === 'HASH' && activeOp === 'range' && (
+                      <span className="text-[9px] text-yellow-500 bg-yellow-500/10 px-1 rounded">N/A</span>
+                    )}
+                  </div>
+                  {hasData ? (
+                    <BarChart
+                      data={data}
+                      title={activeMetric === 'ms' ? 'ms' : 'páginas'}
+                      color={COLORS[tec]}
+                      unit={activeMetric === 'ms' ? '' : ''}
+                    />
+                  ) : (
+                    <div className="h-[200px] flex items-center justify-center text-slate-600 text-xs">
+                      Sin datos
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Tabla resumen */}
+          <div className="bg-[#1e293b] rounded-xl border border-slate-700 overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-700">
+              <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+                Tabla comparativa — {OP_LABELS[activeOp]} — {activeMetric === 'ms' ? 'Tiempo (ms)' : 'Accesos a disco'}
+              </h4>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="bg-slate-800/50">
+                    <th className="px-4 py-2 text-left text-slate-400 font-semibold">Técnica</th>
+                    {(benchData.sizes || []).map(n => (
+                      <th key={n} className="px-4 py-2 text-right text-slate-400 font-semibold">
+                        n={n >= 1000 ? `${n/1000}k` : n}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800">
+                  {TECNICAS.map(tec => (
+                    <tr key={tec} className="hover:bg-slate-800/30 transition-colors">
+                      <td className="px-4 py-2 font-medium flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full inline-block" style={{ background: COLORS[tec] }} />
+                        {LABELS[tec]}
+                      </td>
+                      {(benchData.sizes || []).map(n => {
+                        const val = benchData.results[String(n)]?.[tec]?.[activeOp]?.[activeMetric];
+                        const isNA = tec === 'HASH' && activeOp === 'range';
+                        return (
+                          <td key={n} className="px-4 py-2 text-right font-mono">
+                            {isNA ? (
+                              <span className="text-slate-600">N/A</span>
+                            ) : val != null ? (
+                              <span className="text-slate-200">
+                                {activeMetric === 'ms' ? `${val.toFixed(1)}` : val.toLocaleString()}
+                              </span>
+                            ) : (
+                              <span className="text-slate-600">—</span>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Historial de consultas SQL ejecutadas */}
+      {queryHistory.length > 0 && (
+        <div className="bg-[#1e293b] rounded-xl border border-slate-700 overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
+            <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
+              <Clock size={12} className="text-indigo-400" />
+              Historial de consultas ({queryHistory.length})
+            </h4>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-slate-800/50">
+                  <th className="px-3 py-2 text-left text-slate-400">#</th>
+                  <th className="px-3 py-2 text-left text-slate-400">Consulta</th>
+                  <th className="px-3 py-2 text-right text-slate-400">Tiempo (ms)</th>
+                  <th className="px-3 py-2 text-right text-slate-400">Lecturas</th>
+                  <th className="px-3 py-2 text-right text-slate-400">Escrituras</th>
+                  <th className="px-3 py-2 text-right text-slate-400">Total I/O</th>
+                  <th className="px-3 py-2 text-center text-slate-400">Estado</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800">
+                {[...queryHistory].reverse().map((entry, i) => (
+                  <tr key={i} className="hover:bg-slate-800/30 transition-colors">
+                    <td className="px-3 py-2 text-slate-500 font-mono">{queryHistory.length - i}</td>
+                    <td className="px-3 py-2 font-mono text-indigo-300 max-w-xs truncate" title={entry.sql}>
+                      {entry.sql.length > 60 ? entry.sql.slice(0, 60) + '…' : entry.sql}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-yellow-400">
+                      {entry.tiempo_ms.toFixed(2)}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-blue-400">{entry.reads}</td>
+                    <td className="px-3 py-2 text-right font-mono text-orange-400">{entry.writes}</td>
+                    <td className="px-3 py-2 text-right font-mono text-emerald-400">{entry.total_io}</td>
+                    <td className="px-3 py-2 text-center">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                        entry.ok ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+                      }`}>
+                        {entry.ok ? 'OK' : 'ERR'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {/* Mini gráfico de tiempo por consulta */}
+          <div className="p-4 border-t border-slate-700">
+            <p className="text-xs text-slate-500 mb-2 font-semibold uppercase tracking-wider">
+              Tiempo por consulta (últimas {Math.min(queryHistory.length, 20)})
+            </p>
+            <BarChart
+              data={queryHistory.slice(-20).map((e, i) => ({
+                label: `#${queryHistory.length - queryHistory.slice(-20).length + i + 1}`,
+                value: e.tiempo_ms,
+              }))}
+              title="ms"
+              color="#6366f1"
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const App = () => {
   const [tables, setTables] = useState({});
 
@@ -232,6 +560,8 @@ const App = () => {
   
   // Stats de la última consulta ejecutada
   const [lastQueryStats, setLastQueryStats] = useState(null);
+  // Historial de todas las consultas ejecutadas
+  const [queryHistory, setQueryHistory] = useState([]);
 
   // Estado para visualización R-Tree
   const [rtreePoints, setRtreePoints] = useState([]);
@@ -264,13 +594,16 @@ const App = () => {
       const result = await response.json();
 
       // Guardar stats de la última consulta siempre
-      setLastQueryStats({
+      const queryStats = {
+        sql: sqlQuery,
         tiempo_ms: result.execution_time_ms ?? 0,
         reads: result.io_stats?.reads ?? 0,
         writes: result.io_stats?.writes ?? 0,
         total_io: result.io_stats?.total_io ?? 0,
         ok: result.success,
-      });
+      };
+      setLastQueryStats(queryStats);
+      setQueryHistory(prev => [...prev, queryStats]);
 
       if (result.success) {
         setQueryResult(result.data || []);
@@ -718,6 +1051,12 @@ const App = () => {
                 >
                   🗺 R-Tree
                 </button>
+                <button 
+                  onClick={() => setActiveTab('benchmark')}
+                  className={`text-sm font-medium pb-5 pt-5 border-b-2 transition-all ${activeTab === 'benchmark' ? 'border-yellow-500 text-white' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
+                >
+                  📊 Benchmark
+                </button>
               </nav>
             </div>
             
@@ -939,7 +1278,11 @@ const App = () => {
                 rtreeTables={rtreeTables}
                 onLoadPoints={loadRtreePoints}
               />
-            ):null}
+            ) : activeTab === 'benchmark' ? (
+              <div className="animate-in fade-in duration-300 p-6">
+                <BenchmarkPanel queryHistory={queryHistory} />
+              </div>
+            ) : null}
           </section>
 
           {/* Barra de Estado Inferior */}

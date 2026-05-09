@@ -213,6 +213,13 @@ class ExtendibleHashFile:
     def reset_counters(self):
         self.disk_reads = self.disk_writes = 0
 
+    def get_stats(self):
+        return {
+            "reads": self.disk_reads,
+            "writes": self.disk_writes,
+            "total_io": self.disk_reads + self.disk_writes
+        }
+
     def close(self):
         self._f.close()
 
@@ -245,9 +252,9 @@ class ExtendibleHashFile:
                         id    = int(row["book_key"]),              # ← cambio
                         title = row["title"],
                         author= row["author"],
-                        pages = int(row["pages"]) if row["pages"] else 0,  # ← valor por defecto 0
+                        pages = int(float(row["pages"])) if row["pages"] else 0,  # ← valor por defecto 0
                         rating= float(row["average_rating"]),      # ← cambio
-                        year = int(row["published_date"][:4]) if row["published_date"] else 0    # ← extraer año
+                        year = int(float(row["published_date"])) if row["published_date"] else 0    # ← extraer año
                     ))
                     if (i + 1) % 100 == 0:
                         print(f"  Procesados {i + 1} registros...")

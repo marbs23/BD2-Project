@@ -239,7 +239,15 @@ class Parser:
 
     def _columna(self):
         n=self._expect(TipoToken.IDENT,"nombre columna").valor
-        t=self._expect(TipoToken.IDENT,"tipo columna").valor
+        # El tipo puede ser un IDENT normal (INT, TEXT, FLOAT…) o una keyword
+        # que también es nombre de tipo válido (POINT, INDEX, etc.)
+        _tipo_validos = (TipoToken.IDENT, TipoToken.POINT, TipoToken.K,
+                         TipoToken.FILE, TipoToken.TABLE)
+        if self.current.tipo not in _tipo_validos:
+            raise SyntaxError(
+                f"[Parser] esperaba tipo de columna pero encontré '{self.current.valor}'"
+            )
+        t=self._advance().valor
         idx=None
         if self._match(TipoToken.INDEX):
             idx=self._expect(TipoToken.IDENT,"técnica de índice").valor.upper()

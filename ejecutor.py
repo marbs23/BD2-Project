@@ -203,6 +203,33 @@ class Ejecutor:
             else:  # RTREE
                 store = PageStore(f"{base}_rtree.bin", IOStats())
                 indice = RTree(store)
+                if nodo.archivo:
+                    # Detectar columnas de coordenadas en el CSV.
+                    # Convención: lon_col y lat_col se infieren del header del CSV.
+                    # Soporta: lon/lat, longitude/latitude, x/y, longitud/latitud.
+                    import csv as _csv
+                    _lon_aliases = {"lon", "longitude", "longitud", "x"}
+                    _lat_aliases = {"lat", "latitude", "latitud", "y"}
+                    with open(nodo.archivo, newline="", encoding="utf-8") as _f:
+                        _header = next(_csv.reader(_f))
+                    _header_lower = [c.strip().lower() for c in _header]
+                    _lon_col = next(
+                        (c for c in _header_lower if c in _lon_aliases), None
+                    )
+                    _lat_col = next(
+                        (c for c in _header_lower if c in _lat_aliases), None
+                    )
+                    if _lon_col is None or _lat_col is None:
+                        r.ok = False
+                        r.mensaje = (
+                            f"El CSV '{nodo.archivo}' no tiene columnas de coordenadas. "
+                            f"Se esperan columnas llamadas lon/longitude/longitud/x y "
+                            f"lat/latitude/latitud/y. Columnas encontradas: {_header}"
+                        )
+                        return r
+                    indice.bulk_load_from_csv(
+                        nodo.archivo, lon_col=_lon_col, lat_col=_lat_col
+                    )
         except Exception as e:
             r.ok = False
             r.mensaje = f"Error creando índice: {e}"
@@ -460,6 +487,15 @@ class Ejecutor:
                 if hasattr(indice, "_read_header"):
                     root_page, total_pages, height, total_records = indice._read_header()
                     r.afectados = total_records
+                return
+            except Exception:
+                pass
+        # Para R-Tree, usar las estadísticas del store
+        if hasattr(indice, "stats") and hasattr(indice.stats, "snapshot"):
+            try:
+                snapshot = indice.stats.snapshot()
+                r.reads = snapshot.reads
+                r.writes = snapshot.writes
                 return
             except Exception:
                 pass
