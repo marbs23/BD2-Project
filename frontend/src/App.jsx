@@ -12,7 +12,6 @@ import {
   RotateCcw,
   Info,
   ChevronRight,
-  Download,
   BarChart2,
   Clock,
   HardDrive,
@@ -308,31 +307,41 @@ const BarChart = ({ data, title, color = '#6366f1', unit = '' }) => {
 const BenchmarkPanel = ({ queryHistory }) => {
   const [benchData, setBenchData] = useState(null);
   const [loading, setLoading]     = useState(false);
-  const [activeOp, setActiveOp]   = useState('insert');
-  const [activeMetric, setActiveMetric] = useState('ms');
 
-  // Índices tradicionales (BPTREE, HASH, SEQUENTIAL)
-  const TRADITIONAL_TECNICAS = ['BPTREE', 'SEQUENTIAL', 'HASH'];
-  const TRADITIONAL_COLORS   = { BPTREE: '#6366f1', SEQUENTIAL: '#10b981', HASH: '#f59e0b' };
-  const TRADITIONAL_LABELS   = { BPTREE: 'B+ Tree', SEQUENTIAL: 'Sequential', HASH: 'Ext. Hash' };
-  const TRADITIONAL_OPS      = ['insert', 'search', 'range'];
-  const TRADITIONAL_OP_LABELS = { insert: 'Inserción', search: 'Búsqueda puntual', range: 'Búsqueda por rango' };
+  // Estado independiente para cada sección
+  const [tradOp,     setTradOp]     = useState('insert');
+  const [tradMetric, setTradMetric] = useState('ms');
+  const [spatOp,     setSpatOp]     = useState('insert');
+  const [spatMetric, setSpatMetric] = useState('ms');
 
-  // Índices espaciales (RTREE)
-  const SPATIAL_TECNICAS = ['RTREE'];
-  const SPATIAL_COLORS   = { RTREE: '#a855f7' };
-  const SPATIAL_LABELS   = { RTREE: 'R-Tree' };
-  const SPATIAL_OPS      = ['insert', 'radius', 'knn'];
-  const SPATIAL_OP_LABELS = { insert: 'Inserción', radius: 'Búsqueda por radio', knn: 'Búsqueda KNN' };
+  const TRAD = {
+    tecnicas: ['BPTREE', 'SEQUENTIAL', 'HASH'],
+    colors:   { BPTREE: '#6366f1', SEQUENTIAL: '#10b981', HASH: '#f59e0b' },
+    labels:   { BPTREE: 'B+ Tree', SEQUENTIAL: 'Sequential', HASH: 'Ext. Hash' },
+    ops:      ['insert', 'search', 'range'],
+    opLabels: { insert: 'Inserción', search: 'Búsqueda puntual', range: 'Búsqueda por rango' },
+  };
+
+  const SPAT = {
+    tecnicas: ['RTREE'],
+    colors:   { RTREE: '#a855f7' },
+    labels:   { RTREE: 'R-Tree' },
+    ops:      ['insert', 'radius', 'knn'],
+    opLabels: { insert: 'Inserción (STR)', radius: 'Radio (RADIUS)', knn: 'kNN' },
+    opKey:    { insert: 'insert', radius: 'search', knn: 'knn' },
+  };
 
   const loadBenchmark = async () => {
     setLoading(true);
     try {
-      const res = await fetch('http://localhost:8000/api/benchmark');
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      const res = await fetch('http://localhost:8000/api/benchmark', { signal: controller.signal });
+      clearTimeout(timeout);
       const data = await res.json();
       setBenchData(data);
-    } catch (e) {
-      setBenchData({ success: false, message: 'No se pudo conectar con el backend.' });
+    } catch {
+      setBenchData({ success: false, message: 'Backend no disponible. Inicia el servidor con: python3 main.py' });
     } finally {
       setLoading(false);
     }
@@ -340,52 +349,169 @@ const BenchmarkPanel = ({ queryHistory }) => {
 
   useEffect(() => { loadBenchmark(); }, []);
 
-  // Construir datos para el gráfico de barras por técnica y operación activa
-  const chartDataForTecnica = (tecnica) => {
-    if (!benchData?.results) return [];
-    // Para RTree, mapear 'search' → 'radius' si activeOp es 'radius'
-    const opKey = (tecnica === 'RTREE' && activeOp === 'radius') ? 'search'
-                : (tecnica === 'RTREE' && activeOp === 'knn')    ? 'knn'
-                : activeOp;
-    return (benchData.sizes || []).map(n => {
-      const val = benchData.results[String(n)]?.[tecnica]?.[opKey]?.[activeMetric];
-      return { label: n >= 1000 ? `${n/1000}k` : String(n), value: val ?? 0 };
-    });
+  const GroupedBarChart = ({ tecnicas, colors, labels, opKey, metric }) => {
+    const canvasRef = useRef(null);
+    const sizes = benchData?.sizes || [];
+
+    useEffect(() => {
+      const canvas = canvasRef.current;
+      if (!canvas || sizes.length === 0) return;
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width, H = canvas.height;
+      const PAD_L = 56, PAD_R = 16, PAD_T = 32, PAD_B = 40;
+      const chartW = W - PAD_L - PAD_R;
+      const chartH = H - PAD_T - PAD_B;
+
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = '#1e293b';
+      ctx.fillRect(0, 0, W, H);
+
+      const allVals = tecnicas.flatMap(tec =>
+        sizes.map(n => benchData.results[String(n)]?.[tec]?.[opKey]?.[metric] ?? 0)
+      );
+      const maxVal = Math.max(...allVals, 1);
+
+      const nGroups = sizes.length;
+      const nBars   = tecnicas.length;
+      const groupW  = chartW / nGroups;
+      const barW    = Math.min(groupW / (nBars + 1), 40);
+      const groupPad = (groupW - barW * nBars) / 2;
+
+      // grid
+      ctx.strokeStyle = '#334155'; ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = PAD_T + chartH - (i / 4) * chartH;
+        ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - PAD_R, y); ctx.stroke();
+        ctx.fillStyle = '#64748b'; ctx.font = '9px monospace'; ctx.textAlign = 'right';
+        const v = maxVal * i / 4;
+        ctx.fillText(v >= 1000 ? `${(v/1000).toFixed(1)}k` : v.toFixed(v < 10 ? 1 : 0), PAD_L - 4, y + 3);
+      }
+
+      // barras
+      sizes.forEach((n, gi) => {
+        const gx = PAD_L + gi * groupW;
+        tecnicas.forEach((tec, bi) => {
+          const val  = benchData.results[String(n)]?.[tec]?.[opKey]?.[metric] ?? 0;
+          const barH = (val / maxVal) * chartH;
+          const x    = gx + groupPad + bi * barW;
+          const y    = PAD_T + chartH - barH;
+          const col  = colors[tec];
+
+          ctx.fillStyle = col + '33';
+          ctx.fillRect(x + 2, y + 2, barW - 2, barH);
+
+          const grad = ctx.createLinearGradient(x, y, x, y + barH);
+          grad.addColorStop(0, col); grad.addColorStop(1, col + '88');
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.roundRect(x, y, barW - 2, barH, [3, 3, 0, 0]);
+          ctx.fill();
+
+          if (val > 0) {
+            ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 8px monospace'; ctx.textAlign = 'center';
+            const lbl = val >= 1000 ? `${(val/1000).toFixed(1)}k` : val.toFixed(val < 10 ? 1 : 0);
+            ctx.fillText(lbl, x + (barW - 2) / 2, y - 3);
+          }
+        });
+
+        ctx.fillStyle = '#94a3b8'; ctx.font = '10px monospace'; ctx.textAlign = 'center';
+        ctx.fillText(n >= 1000 ? `${n/1000}k` : String(n), gx + groupW / 2, PAD_T + chartH + 16);
+      });
+
+      // leyenda
+      tecnicas.forEach((tec, i) => {
+        const lx = PAD_L + i * 100;
+        ctx.fillStyle = colors[tec];
+        ctx.fillRect(lx, 10, 10, 10);
+        ctx.fillStyle = '#94a3b8'; ctx.font = '9px monospace'; ctx.textAlign = 'left';
+        ctx.fillText(labels[tec], lx + 13, 19);
+      });
+    }, [tecnicas, opKey, metric, sizes]);
+
+    return <canvas ref={canvasRef} width={600} height={260} className="w-full rounded-lg" />;
   };
 
-  const BenchmarkSection = ({ title, tecnicas, colors, labels }) => {
+  const Section = ({ title, cfg, activeOp, setActiveOp, activeMetric, setActiveMetric }) => {
+    const opKey = cfg.opKey ? cfg.opKey[activeOp] : activeOp;
+    const accentCol = cfg.tecnicas[0] === 'RTREE' ? '#a855f7' : '#6366f1';
     return (
-      <div className="space-y-4">
-        <h4 className="text-sm font-bold text-slate-300 border-b border-slate-700 pb-2">
-          {title}
-        </h4>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {tecnicas.map(tec => {
-            const data = chartDataForTecnica(tec);
-            const hasData = data.some(d => d.value > 0);
-            return (
-              <div key={tec} className="bg-[#1e293b] rounded-xl border border-slate-700 p-3">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="w-2 h-2 rounded-full" style={{ background: colors[tec] }} />
-                  <span className="text-xs font-bold text-slate-300">{labels[tec]}</span>
-                  {tec === 'HASH' && activeOp === 'range' && (
-                    <span className="text-[9px] text-yellow-500 bg-yellow-500/10 px-1 rounded">N/A</span>
-                  )}
-                </div>
-                {hasData ? (
-                  <BarChart
-                    data={data}
-                    title={activeMetric === 'ms' ? 'ms' : 'páginas'}
-                    color={colors[tec]}
-                  />
-                ) : (
-                  <div className="h-[200px] flex items-center justify-center text-slate-600 text-xs">
-                    Sin datos
-                  </div>
-                )}
-              </div>
-            );
-          })}
+      <div className="bg-[#1e293b] rounded-xl border border-slate-700 overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between flex-wrap gap-2">
+          <h4 className="text-sm font-bold text-slate-200">{title}</h4>
+          <div className="flex gap-2 flex-wrap">
+            <div className="flex rounded-lg overflow-hidden border border-slate-600">
+              {cfg.ops.map(op => (
+                <button key={op} onClick={() => setActiveOp(op)}
+                  className="px-3 py-1 text-xs font-medium transition-colors"
+                  style={activeOp === op
+                    ? { background: accentCol, color: 'white' }
+                    : { background: '#1e293b', color: '#94a3b8' }}>
+                  {cfg.opLabels[op]}
+                </button>
+              ))}
+            </div>
+            <div className="flex rounded-lg overflow-hidden border border-slate-600">
+              <button onClick={() => setActiveMetric('ms')}
+                className={`px-3 py-1 text-xs font-medium flex items-center gap-1 transition-colors ${
+                  activeMetric === 'ms' ? 'bg-yellow-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-white'}`}>
+                <Clock size={10}/> ms
+              </button>
+              <button onClick={() => setActiveMetric('io')}
+                className={`px-3 py-1 text-xs font-medium flex items-center gap-1 transition-colors ${
+                  activeMetric === 'io' ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-white'}`}>
+                <HardDrive size={10}/> I/O
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="p-4">
+          <GroupedBarChart
+            tecnicas={cfg.tecnicas} colors={cfg.colors} labels={cfg.labels}
+            opKey={opKey} metric={activeMetric}
+          />
+        </div>
+
+        <div className="border-t border-slate-700 overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-slate-800/50">
+                <th className="px-4 py-2 text-left text-slate-400">Técnica</th>
+                {(benchData?.sizes || []).map(n => (
+                  <th key={n} className="px-4 py-2 text-right text-slate-400">
+                    n={n >= 1000 ? `${n/1000}k` : n}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800">
+              {cfg.tecnicas.map(tec => (
+                <tr key={tec} className="hover:bg-slate-800/30">
+                  <td className="px-4 py-2 flex items-center gap-2 font-medium">
+                    <span className="w-2 h-2 rounded-full" style={{ background: cfg.colors[tec] }}/>
+                    {cfg.labels[tec]}
+                    {tec === 'HASH' && activeOp === 'range' &&
+                      <span className="text-[9px] text-yellow-500 bg-yellow-500/10 px-1 rounded ml-1">N/A</span>}
+                  </td>
+                  {(benchData?.sizes || []).map(n => {
+                    const isNA = tec === 'HASH' && activeOp === 'range';
+                    const val  = benchData?.results[String(n)]?.[tec]?.[opKey]?.[activeMetric];
+                    return (
+                      <td key={n} className="px-4 py-2 text-right font-mono">
+                        {isNA
+                          ? <span className="text-slate-600">N/A</span>
+                          : val != null
+                            ? <span className="text-slate-200">
+                                {activeMetric === 'ms' ? val.toFixed(1) : val.toLocaleString()}
+                              </span>
+                            : <span className="text-slate-600">—</span>}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </div>
     );
@@ -399,11 +525,8 @@ const BenchmarkPanel = ({ queryHistory }) => {
           <BarChart2 size={18} className="text-indigo-400" />
           Evaluación Experimental
         </h3>
-        <button
-          onClick={loadBenchmark}
-          disabled={loading}
-          className="flex items-center gap-2 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-600 text-white text-xs rounded-lg transition-colors"
-        >
+        <button onClick={loadBenchmark} disabled={loading}
+          className="flex items-center gap-2 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-600 text-white text-xs rounded-lg transition-colors">
           <RotateCcw size={12} className={loading ? 'animate-spin' : ''} />
           {loading ? 'Cargando...' : 'Actualizar'}
         </button>
@@ -421,133 +544,25 @@ const BenchmarkPanel = ({ queryHistory }) => {
         </div>
       ) : (
         <>
-          {/* Selectores de operación y métrica */}
-          <div className="space-y-4">
-            {/* Índices Tradicionales */}
-            <div className="flex gap-3 flex-wrap">
-              <div className="flex bg-slate-800 rounded-lg p-1 gap-1">
-                {TRADITIONAL_OPS.map(op => (
-                  <button key={op}
-                    onClick={() => setActiveOp(op)}
-                    className={`px-3 py-1 text-xs rounded-md transition-colors font-medium ${
-                      activeOp === op ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    {TRADITIONAL_OP_LABELS[op]}
-                  </button>
-                ))}
-              </div>
-            </div>
-            
-            {/* Índices Espaciales */}
-            <div className="flex gap-3 flex-wrap">
-              <div className="flex bg-purple-900/30 rounded-lg p-1 gap-1 border border-purple-700/50">
-                {SPATIAL_OPS.map(op => (
-                  <button key={op}
-                    onClick={() => setActiveOp(op)}
-                    className={`px-3 py-1 text-xs rounded-md transition-colors font-medium ${
-                      activeOp === op ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    {SPATIAL_OP_LABELS[op]}
-                  </button>
-                ))}
-              </div>
-            </div>
-            
-            {/* Métricas */}
-            <div className="flex gap-3 flex-wrap">
-              <div className="flex bg-slate-800 rounded-lg p-1 gap-1">
-                <button onClick={() => setActiveMetric('ms')}
-                  className={`px-3 py-1 text-xs rounded-md transition-colors font-medium flex items-center gap-1 ${
-                    activeMetric === 'ms' ? 'bg-yellow-600 text-white' : 'text-slate-400 hover:text-white'
-                  }`}>
-                  <Clock size={10} /> Tiempo (ms)
-                </button>
-                <button onClick={() => setActiveMetric('io')}
-                  className={`px-3 py-1 text-xs rounded-md transition-colors font-medium flex items-center gap-1 ${
-                    activeMetric === 'io' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'
-                  }`}>
-                  <HardDrive size={10} /> Accesos disco
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Sección de Índices Tradicionales */}
-          <BenchmarkSection
-            title="📊 Índices Tradicionales (B+ Tree, Hash, Sequential)"
-            tecnicas={TRADITIONAL_TECNICAS}
-            colors={TRADITIONAL_COLORS}
-            labels={TRADITIONAL_LABELS}
+          <Section
+            title="📊 Índices Tradicionales — B+ Tree · Sequential File · Ext. Hash"
+            cfg={TRAD}
+            activeOp={tradOp}         setActiveOp={setTradOp}
+            activeMetric={tradMetric} setActiveMetric={setTradMetric}
           />
-
-          {/* Sección de Índices Espaciales */}
-          <BenchmarkSection
-            title="🗺️ Índices Espaciales (R-Tree)"
-            tecnicas={SPATIAL_TECNICAS}
-            colors={SPATIAL_COLORS}
-            labels={SPATIAL_LABELS}
+          <Section
+            title="🗺️ Índice Espacial — R-Tree"
+            cfg={SPAT}
+            activeOp={spatOp}         setActiveOp={setSpatOp}
+            activeMetric={spatMetric} setActiveMetric={setSpatMetric}
           />
-
-          {/* Tabla resumen */}
-          <div className="bg-[#1e293b] rounded-xl border border-slate-700 overflow-hidden">
-            <div className="px-4 py-3 border-b border-slate-700">
-              <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
-                Tabla comparativa — {activeOp === 'radius' || activeOp === 'knn' ? SPATIAL_OP_LABELS[activeOp] : TRADITIONAL_OP_LABELS[activeOp]} — {activeMetric === 'ms' ? 'Tiempo (ms)' : 'Accesos a disco'}
-              </h4>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="bg-slate-800/50">
-                    <th className="px-4 py-2 text-left text-slate-400 font-semibold">Técnica</th>
-                    {(benchData.sizes || []).map(n => (
-                      <th key={n} className="px-4 py-2 text-right text-slate-400 font-semibold">
-                        n={n >= 1000 ? `${n/1000}k` : n}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800">
-                  {[...TRADITIONAL_TECNICAS, ...SPATIAL_TECNICAS].map(tec => (
-                    <tr key={tec} className="hover:bg-slate-800/30 transition-colors">
-                      <td className="px-4 py-2 font-medium flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full inline-block" style={{ background: tec === 'RTREE' ? SPATIAL_COLORS[tec] : TRADITIONAL_COLORS[tec] }} />
-                        {tec === 'RTREE' ? SPATIAL_LABELS[tec] : TRADITIONAL_LABELS[tec]}
-                      </td>
-                      {(benchData.sizes || []).map(n => {
-                        const val = benchData.results[String(n)]?.[tec]?.[activeOp]?.[activeMetric];
-                        const isNA = tec === 'HASH' && activeOp === 'range';
-                        const colors = tec === 'RTREE' ? SPATIAL_COLORS : TRADITIONAL_COLORS;
-                        const labels = tec === 'RTREE' ? SPATIAL_LABELS : TRADITIONAL_LABELS;
-                        return (
-                          <td key={n} className="px-4 py-2 text-right font-mono">
-                            {isNA ? (
-                              <span className="text-slate-600">N/A</span>
-                            ) : val != null ? (
-                              <span className="text-slate-200">
-                                {activeMetric === 'ms' ? `${val.toFixed(1)}` : val.toLocaleString()}
-                              </span>
-                            ) : (
-                              <span className="text-slate-600">—</span>
-                            )}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
         </>
       )}
 
-      {/* Historial de consultas SQL ejecutadas */}
+      {/* Historial de consultas */}
       {queryHistory.length > 0 && (
         <div className="bg-[#1e293b] rounded-xl border border-slate-700 overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
+          <div className="px-4 py-3 border-b border-slate-700">
             <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
               <Clock size={12} className="text-indigo-400" />
               Historial de consultas ({queryHistory.length})
@@ -559,7 +574,7 @@ const BenchmarkPanel = ({ queryHistory }) => {
                 <tr className="bg-slate-800/50">
                   <th className="px-3 py-2 text-left text-slate-400">#</th>
                   <th className="px-3 py-2 text-left text-slate-400">Consulta</th>
-                  <th className="px-3 py-2 text-right text-slate-400">Tiempo (ms)</th>
+                  <th className="px-3 py-2 text-right text-slate-400">ms</th>
                   <th className="px-3 py-2 text-right text-slate-400">Lecturas</th>
                   <th className="px-3 py-2 text-right text-slate-400">Escrituras</th>
                   <th className="px-3 py-2 text-right text-slate-400">Total I/O</th>
@@ -568,30 +583,25 @@ const BenchmarkPanel = ({ queryHistory }) => {
               </thead>
               <tbody className="divide-y divide-slate-800">
                 {[...queryHistory].reverse().map((entry, i) => (
-                  <tr key={i} className="hover:bg-slate-800/30 transition-colors">
+                  <tr key={i} className="hover:bg-slate-800/30">
                     <td className="px-3 py-2 text-slate-500 font-mono">{queryHistory.length - i}</td>
                     <td className="px-3 py-2 font-mono text-indigo-300 max-w-xs truncate" title={entry.sql}>
                       {entry.sql.length > 60 ? entry.sql.slice(0, 60) + '…' : entry.sql}
                     </td>
-                    <td className="px-3 py-2 text-right font-mono text-yellow-400">
-                      {entry.tiempo_ms.toFixed(2)}
-                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-yellow-400">{entry.tiempo_ms.toFixed(2)}</td>
                     <td className="px-3 py-2 text-right font-mono text-blue-400">{entry.reads}</td>
                     <td className="px-3 py-2 text-right font-mono text-orange-400">{entry.writes}</td>
                     <td className="px-3 py-2 text-right font-mono text-emerald-400">{entry.total_io}</td>
                     <td className="px-3 py-2 text-center">
                       <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
                         entry.ok ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
-                      }`}>
-                        {entry.ok ? 'OK' : 'ERR'}
-                      </span>
+                      }`}>{entry.ok ? 'OK' : 'ERR'}</span>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-          {/* Mini gráfico de tiempo por consulta */}
           <div className="p-4 border-t border-slate-700">
             <p className="text-xs text-slate-500 mb-2 font-semibold uppercase tracking-wider">
               Tiempo por consulta (últimas {Math.min(queryHistory.length, 20)})
@@ -601,8 +611,7 @@ const BenchmarkPanel = ({ queryHistory }) => {
                 label: `#${queryHistory.length - queryHistory.slice(-20).length + i + 1}`,
                 value: e.tiempo_ms,
               }))}
-              title="ms"
-              color="#6366f1"
+              title="ms" color="#6366f1"
             />
           </div>
         </div>
@@ -614,7 +623,7 @@ const BenchmarkPanel = ({ queryHistory }) => {
 const App = () => {
   const [tables, setTables] = useState({});
 
-  const [activeTab, setActiveTab] = useState('console'); // 'console', 'stats', 'upload'
+  const [activeTab, setActiveTab] = useState('console'); // 'console', 'stats', 'rtree', 'benchmark'
   const [sqlQuery, setSqlQuery] = useState('');
   const [queryResult, setQueryResult] = useState(null);
   const [queryError, setQueryError] = useState(null);
@@ -623,7 +632,6 @@ const App = () => {
   // Estados para estadísticas y gestión de índices
   const [stats, setStats] = useState(null);
   const [indexTypes, setIndexTypes] = useState(null);
-  const [selectedIndexType, setSelectedIndexType] = useState('BPTREE');
   const [concurrencyStats, setConcurrencyStats] = useState(null);
   
   // Stats de la última consulta ejecutada
@@ -635,11 +643,6 @@ const App = () => {
   const [rtreePoints, setRtreePoints] = useState([]);
   const [rtreeQuery, setRtreeQuery] = useState(null); // { lon, lat, radius }
   const [rtreeTables, setRtreeTables] = useState([]);
-
-  // Estados para manejo de archivos CSV
-  const [csvFile, setCsvFile] = useState(null);
-  const [tableName, setTableName] = useState('');
-  const [tableColumns, setTableColumns] = useState('');
 
   // Notificaciones
   const showNotification = (msg) => {
@@ -709,7 +712,9 @@ const App = () => {
   // Cargar tablas desde el backend
   const loadTables = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/tables?database_path=.');
+      const ctrl = new AbortController();
+      setTimeout(() => ctrl.abort(), 3000);
+      const response = await fetch('http://localhost:8000/api/tables?database_path=.', { signal: ctrl.signal });
       const data = await response.json();
       if (data.success) {
         const tablesMap = {};
@@ -742,172 +747,31 @@ const App = () => {
   // Cargar estadísticas del backend (optimizado)
   const loadStats = async () => {
     try {
-      // Solo hacer peticiones si no hay una en curso
       if (window.loadingStats) return;
       window.loadingStats = true;
 
-      const [statsResponse, indexTypesResponse, concurrencyResponse] = await Promise.all([
-        fetch('http://localhost:8000/api/stats?database_path=.'),
-        fetch('http://localhost:8000/api/index-types'),
-        fetch('http://localhost:8000/api/concurrency/stats')
-      ]);
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 3000);
 
-      const statsData = await statsResponse.json();
-      const indexTypesData = await indexTypesResponse.json();
+      const [statsResponse, indexTypesResponse, concurrencyResponse] = await Promise.all([
+        fetch('http://localhost:8000/api/stats?database_path=.',    { signal: ctrl.signal }),
+        fetch('http://localhost:8000/api/index-types',              { signal: ctrl.signal }),
+        fetch('http://localhost:8000/api/concurrency/stats',        { signal: ctrl.signal }),
+      ]);
+      clearTimeout(t);
+
+      const statsData       = await statsResponse.json();
+      const indexTypesData  = await indexTypesResponse.json();
       const concurrencyData = await concurrencyResponse.json();
 
-      if (statsData.success) setStats(statsData.stats);
-      if (indexTypesData.success) setIndexTypes(indexTypesData.index_types);
+      if (statsData.success)       setStats(statsData.stats);
+      if (indexTypesData.success)  setIndexTypes(indexTypesData.index_types);
       if (concurrencyData.success) setConcurrencyStats(concurrencyData.stats);
 
-    } catch (err) {
-      console.error('Error cargando estadísticas:', err);
+    } catch {
+      // backend no disponible — no bloquear la UI
     } finally {
       window.loadingStats = false;
-    }
-  };
-
-  // Autocompletar campos basados en el nombre del archivo CSV
-  const autoFillFields = (fileName) => {
-    const fileNameLower = fileName.toLowerCase();
-    
-    // Mapeo de archivos conocidos a sus configuraciones
-    const fileConfigs = {
-      'books_1000.csv': {
-        tableName: 'books',
-        columns: 'id INT INDEX BPTREE, title TEXT, author TEXT, pages INT, average_rating FLOAT, published_date INT'
-      },
-      'books_10000.csv': {
-        tableName: 'books',
-        columns: 'id INT INDEX BPTREE, title TEXT, author TEXT, pages INT, average_rating FLOAT, published_date INT'
-      },
-      'books_100000.csv': {
-        tableName: 'books',
-        columns: 'id INT INDEX BPTREE, title TEXT, author TEXT, pages INT, average_rating FLOAT, published_date INT'
-      },
-      'books_1000000.csv': {
-        tableName: 'books',
-        columns: 'id INT INDEX BPTREE, title TEXT, author TEXT, pages INT, average_rating FLOAT, published_date INT'
-      },
-    };
-
-    const config = fileConfigs[fileNameLower];
-    if (config) {
-      setTableName(config.tableName);
-      setTableColumns(config.columns);
-    }
-  };
-
-  // Crear tabla desde archivo CSV
-  const createTableFromCSV = async () => {
-    if (!csvFile || !tableName || !tableColumns) {
-      showNotification('Por favor completa todos los campos', 'error');
-      return;
-    }
-
-    try {
-      // Parsear las columnas del textarea
-      const columns = tableColumns.split(',').map(col => {
-        const parts = col.trim().split(' ');
-        return {
-          name: parts[0],
-          type: parts[1] || 'TEXT',
-          index: parts.includes('INDEX')
-        };
-      });
-
-      // Crear FormData para enviar el archivo
-      const formData = new FormData();
-      formData.append('table_name', tableName);
-      formData.append('columns', JSON.stringify(columns.reduce((acc, col) => {
-        acc[col.name] = col.type;
-        return acc;
-      }, {})));
-      formData.append('file', csvFile);  // Enviar el archivo real
-      formData.append('file_path', csvFile.name);
-      formData.append('database_path', '.');
-
-      const response = await fetch('http://localhost:8000/api/create-table-from-file', {
-        method: 'POST',
-        body: formData
-      });
-
-      const result = await response.json();
-      
-      if (result.success) {
-        showNotification(`Tabla ${tableName} creada con ${result.records_loaded} registros`);
-        loadStats();
-        // Limpiar formulario
-        setCsvFile(null);
-        setTableName('');
-        setTableColumns('');
-        document.getElementById('csv-input').value = '';
-        document.getElementById('columns-input').value = '';
-      } else {
-        showNotification('Error creando tabla: ' + (result.error || result.message), 'error');
-      }
-
-    } catch (err) {
-      showNotification('Error de conexión: ' + err.message, 'error');
-    }
-  };
-
-  // Crear tabla con índice específico
-  const createTableWithIndex = async (tableName, columns, indexType) => {
-    try {
-      const columnsDef = columns.map(col => `${col.name} ${col.type}${col.index ? ` INDEX ${indexType}` : ''}`).join(', ');
-      const createSQL = `CREATE TABLE ${tableName} (${columnsDef});`;
-
-      const response = await fetch('http://localhost:8000/api/execute', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          query: createSQL,
-          database_path: "."
-        })
-      });
-
-      const result = await response.json();
-      
-      if (result.success) {
-        showNotification(`Tabla ${tableName} creada con índice ${indexType}`);
-        loadStats();
-      } else {
-        showNotification('Error creando tabla: ' + (result.error || result.message), 'error');
-      }
-
-    } catch (err) {
-      showNotification('Error de conexión: ' + err.message, 'error');
-    }
-  };
-
-  // Ejecutar benchmark de índice
-  const runBenchmark = async (tableName, column, indexType) => {
-    try {
-      const response = await fetch('http://localhost:8000/api/index-performance', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          table_name: tableName,
-          index_type: indexType,
-          column_name: column
-        })
-      });
-
-      const result = await response.json();
-      
-      if (result.success) {
-        showNotification(`Benchmark completado: ${result.summary.successful_operations}/${result.summary.total_operations} operaciones exitosas`);
-      } else {
-        showNotification('Error en benchmark: ' + (result.error || result.message), 'error');
-      }
-
-    } catch (err) {
-      showNotification('Error de conexión: ' + err.message, 'error');
     }
   };
 
@@ -1053,15 +917,6 @@ const App = () => {
               }
             }} />
 
-            <div>
-              <p className="text-xs font-semibold text-slate-500 uppercase mb-3 px-2">Herramientas</p>
-              <button 
-                onClick={() => setActiveTab('upload')}
-                className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${activeTab === 'upload' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'hover:bg-slate-800 text-slate-400'}`}
-              >
-                <Download size={16} /> Subir CSV
-              </button>
-            </div>
           </div>
         </aside>
 
@@ -1087,12 +942,6 @@ const App = () => {
                   className={`text-sm font-medium pb-5 pt-5 border-b-2 transition-all ${activeTab === 'stats' ? 'border-indigo-500 text-white' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
                 >
                   Estadísticas
-                </button>
-                <button 
-                  onClick={() => setActiveTab('upload')}
-                  className={`text-sm font-medium pb-5 pt-5 border-b-2 transition-all ${activeTab === 'upload' ? 'border-indigo-500 text-white' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
-                >
-                  Subir CSV
                 </button>
                 <button 
                   onClick={() => setActiveTab('rtree')}
@@ -1240,83 +1089,6 @@ const App = () => {
                         <p>Escribe una consulta y presiona "Ejecutar" para ver los resultados.</p>
                       </div>
                     )}
-                  </div>
-                </div>
-              </div>
-            ) : activeTab === 'upload' ? (
-              <div className="animate-in fade-in duration-300 p-6">
-                <div className="max-w-2xl mx-auto">
-                  <h3 className="text-xl font-semibold mb-6 flex items-center gap-2">
-                    <Download className="text-slate-500" /> Subir Archivo CSV
-                  </h3>
-                  
-                  <div className="bg-[#1e293b] rounded-xl border border-slate-700 p-6 space-y-4">
-                    <div>
-                      <label className="block text-sm font-medium text-slate-300 mb-2">Nombre de la Tabla</label>
-                      <input
-                        type="text"
-                        value={tableName}
-                        onChange={(e) => setTableName(e.target.value)}
-                        placeholder="ej: products, books, clients, etc."
-                        className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                      />
-                    </div>
-                    
-                    <div>
-                      <label className="block text-sm font-medium text-slate-300 mb-2">Definición de Columnas</label>
-                      <textarea
-                        id="columns-input"
-                        value={tableColumns}
-                        onChange={(e) => setTableColumns(e.target.value)}
-                        placeholder="id INT INDEX BPTREE, name TEXT, email TEXT INDEX HASH, ..."
-                        className="w-full h-20 px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-sm"
-                      />
-                      <p className="text-xs text-slate-500 mt-1">Formato: columna1 TIPO [INDEX TIPO_INDICE], columna2 TIPO, ...</p>
-                    </div>
-                    
-                    <div>
-                      <label className="block text-sm font-medium text-slate-300 mb-2">Archivo CSV</label>
-                      <input
-                        id="csv-input"
-                        type="file"
-                        accept=".csv"
-                        onChange={(e) => {
-              const file = e.target.files[0];
-              setCsvFile(file);
-              if (file) {
-                autoFillFields(file.name);
-              }
-            }}
-                        className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-slate-200 file:mr-2 file:py-1 file:px-3"
-                      />
-                      {csvFile && (
-                        <p className="text-sm text-slate-400 mt-2">
-                          Archivo seleccionado: <span className="text-indigo-400">{csvFile.name}</span>
-                        </p>
-                      )}
-                    </div>
-                    
-                    <div className="flex gap-2">
-                      <select
-                        value={selectedIndexType}
-                        onChange={(e) => setSelectedIndexType(e.target.value)}
-                        className="flex-1 px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                      >
-                        <option value="BPTREE">B+ Tree</option>
-                        <option value="SEQUENTIAL">Sequential File</option>
-                        <option value="HASH">Extendible Hash</option>
-                        <option value="RTREE">R-Tree</option>
-                      </select>
-                      
-                      <button
-                        onClick={createTableFromCSV}
-                        disabled={!csvFile || !tableName || !tableColumns}
-                        className="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-600 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg flex items-center justify-center gap-2 transition-all"
-                      >
-                        <Download size={16} />
-                        Crear Tabla desde CSV
-                      </button>
-                    </div>
                   </div>
                 </div>
               </div>
