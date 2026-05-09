@@ -11,19 +11,66 @@
 # 4. R-Tree - Índice espacial para consultas geográficas
 
 # ================================================================
+# 0. CREACIÓN DE TABLAS PARA DEMOSTRACIÓN
+# ================================================================
+# Estas sentencias CREATE TABLE deben ejecutarse ANTES de las consultas
+# de demostración para asegurar que todas las tablas existan
+
+-- Crear tabla B+ Tree para libros (1K registros)
+CREATE TABLE books_bpt_1k (
+    book_key INT INDEX BPTREE,
+    title TEXT,
+    author TEXT,
+    pages INT,
+    rating FLOAT,
+    year INT
+) FROM FILE "./books/books_1000.csv";
+
+-- Crear tabla Hash para libros (1K registros)
+CREATE TABLE books_hash_1k (
+    book_key INT INDEX HASH,
+    title TEXT,
+    author TEXT,
+    pages INT,
+    rating FLOAT,
+    year INT
+) FROM FILE "./books/books_1000.csv";
+
+-- Crear tabla Sequential para libros (1K registros)
+CREATE TABLE books_seq_1k (
+    book_key INT,
+    title TEXT,
+    author TEXT,
+    pages INT,
+    rating FLOAT,
+    year INT
+) FROM FILE "./books/books_1000.csv";
+
+-- Crear tabla R-Tree para coordenadas (10K registros)
+CREATE TABLE coords_rtree_10k_rtree (
+    point_id INT INDEX RTREE,
+    lon FLOAT,
+    lat FLOAT
+) FROM FILE "./coords/coords_10000.csv";
+
+-- NOTA: Las tablas deben crearse en este orden para evitar conflictos
+-- Las tablas B+ Tree y Sequential usan BPTREE por defecto en el sistema
+-- La tabla R-Tree requiere la columna con índice RTREE para consultas espaciales
+
+# ================================================================
 # 1. DEMOSTRACIÓN B+ TREE
 # ================================================================
 # Búsqueda por clave primaria usando índice B+ Tree
 # Muestra acceso eficiente O(log n) con estadísticas de I/O
 
 -- Búsqueda puntual en tabla B+ Tree (1K registros)
-SELECT * FROM books_bpt_1k WHERE book_key = 1;
+SELECT * FROM books_bpt_1k WHERE book_key = 2145253;
 
 -- Búsqueda puntual en tabla B+ Tree (diferente clave)  
-SELECT * FROM books_bpt_1k WHERE book_key = 500;
+SELECT * FROM books_bpt_1k WHERE book_key = 958696;
 
 -- Búsqueda por rango usando BETWEEN
-SELECT * FROM books_bpt_1k WHERE book_key BETWEEN 100 AND 200;
+SELECT * FROM books_bpt_1k WHERE book_key BETWEEN 1000000 AND 2000000;
 
 # ================================================================
 # 2. DEMOSTRACIÓN EXTENDIBLE HASH
@@ -32,13 +79,13 @@ SELECT * FROM books_bpt_1k WHERE book_key BETWEEN 100 AND 200;
 # Muestra acceso directo O(1) con manejo de colisiones
 
 -- Búsqueda puntual en tabla Hash (1K registros)
-SELECT * FROM books_hash_1k WHERE book_key = 1;
+SELECT * FROM books_hash_1k WHERE book_key = 2145253;
 
 -- Búsqueda puntual con clave diferente
-SELECT * FROM books_hash_1k WHERE book_key = 999;
+SELECT * FROM books_hash_1k WHERE book_key = 1793387;
 
 -- Búsqueda con clave que probablemente cause colisión
-SELECT * FROM books_hash_1k WHERE book_key = 256;
+SELECT * FROM books_hash_1k WHERE book_key = 916302;
 
 # ================================================================
 # 3. DEMOSTRACIÓN SEQUENTIAL FILE
@@ -47,13 +94,13 @@ SELECT * FROM books_hash_1k WHERE book_key = 256;
 # Muestra escaneo eficiente con estadísticas de I/O
 
 -- Búsqueda puntual en tabla Sequential (1K registros)
-SELECT * FROM books_seq_1k WHERE book_key = 1;
+SELECT * FROM books_seq_1k WHERE book_key = 2145253;
 
 -- Búsqueda por rango en archivo secuencial
-SELECT * FROM books_seq_1k WHERE book_key BETWEEN 100 AND 200;
+SELECT * FROM books_seq_1k WHERE book_key BETWEEN 1000000 AND 2000000;
 
 -- Búsqueda con LIMIT para mostrar eficiencia
-SELECT * FROM books_seq_1k WHERE book_key > 500 LIMIT 10;
+SELECT * FROM books_seq_1k WHERE book_key > 2000000 LIMIT 10;
 
 # ================================================================
 # 4. DEMOSTRACIÓN R-TREE (ÍNDICES ESPACIALES)
@@ -62,16 +109,16 @@ SELECT * FROM books_seq_1k WHERE book_key > 500 LIMIT 10;
 # El frontend mostrará automáticamente la visualización espacial
 
 -- Búsqueda por radio: encuentra todos los puntos dentro de un círculo
--- Coordenadas: (29.266858, 41.047655) - Estambul, Turquía
+-- Coordenadas: (-47.074277, -24.045516) - Primer punto del dataset
 -- Radio: 100 unidades
 -- RESULTADO: Visualización con círculo de búsqueda y puntos encontrados
-SELECT * FROM coords_rtree_10k_rtree WHERE point_id IN (POINT(29.266858, 41.047655), RADIUS 100);
+SELECT * FROM coords_rtree_10k_rtree WHERE point_id IN (POINT(-47.074277, -24.045516), RADIUS 100);
 
 -- Búsqueda KNN: encuentra los 5 puntos más cercanos
--- Coordenadas: (29.266858, 41.047655) - Estambul, Turquía
+-- Coordenadas: (2.868954, 49.109141) - Segundo punto del dataset
 -- K: 5 vecinos más cercanos
 -- RESULTADO: Visualización con líneas de conexión a los 5 vecinos más cercanos
-SELECT * FROM coords_rtree_10k_rtree WHERE point_id IN (POINT(29.266858, 41.047655), K 5);
+SELECT * FROM coords_rtree_10k_rtree WHERE point_id IN (POINT(2.868954, 49.109141), K 5);
 
 -- Búsqueda por radio en Nueva York
 -- Coordenadas: (-74.0060, 40.7128) - Nueva York, EE.UU.
@@ -88,14 +135,14 @@ SELECT * FROM coords_rtree_10k_rtree WHERE point_id IN (POINT(-0.1278, 51.5074),
 # ================================================================
 # Demostración de operaciones de escritura en diferentes índices
 
--- Inserción en tabla B+ Tree
-INSERT INTO books_bpt_1k VALUES (9999, "Nuevo Libro BD2", "Autor Demo", 250, 4.5, 2024);
+-- Inserción en tabla B+ Tree (ID único alto para evitar conflictos)
+INSERT INTO books_bpt_1k VALUES (9999999, "Nuevo Libro BD2", "Autor Demo", 250, 4.5, 2024);
 
--- Inserción en tabla Hash
-INSERT INTO books_hash_1k VALUES (8888, "Libro Hash Demo", "Autor Hash", 180, 3.8, 2023);
+-- Inserción en tabla Hash (ID único alto para evitar conflictos)
+INSERT INTO books_hash_1k VALUES (8888888, "Libro Hash Demo", "Autor Hash", 180, 3.8, 2023);
 
--- Inserción en tabla Sequential
-INSERT INTO books_seq_1k VALUES (7777, "Libro Sequential Demo", "Autor Seq", 320, 4.2, 2024);
+-- Inserción en tabla Sequential (ID único alto para evitar conflictos)
+INSERT INTO books_seq_1k VALUES (7777777, "Libro Sequential Demo", "Autor Seq", 320, 4.2, 2024);
 
 # ================================================================
 # 6. CONSULTAS COMPARATIVAS DE RENDIMIENTO
@@ -103,9 +150,9 @@ INSERT INTO books_seq_1k VALUES (7777, "Libro Sequential Demo", "Autor Seq", 320
 # Estas consultas permiten comparar el rendimiento entre diferentes índices
 
 -- MISMA BÚSQUEDA en diferentes tipos de índices:
--- B+ Tree: SELECT * FROM books_bpt_1k WHERE book_key = 1;
--- Hash:    SELECT * FROM books_hash_1k WHERE book_key = 1;  
--- Sequential: SELECT * FROM books_seq_1k WHERE book_key = 1;
+-- B+ Tree: SELECT * FROM books_bpt_1k WHERE book_key = 2145253;
+-- Hash:    SELECT * FROM books_hash_1k WHERE book_key = 2145253;  
+-- Sequential: SELECT * FROM books_seq_1k WHERE book_key = 2145253;
 
 -- Comparar tiempos de ejecución y operaciones de I/O en el frontend
 -- Observar las diferencias en:
@@ -153,6 +200,44 @@ INSERT INTO books_seq_1k VALUES (7777, "Libro Sequential Demo", "Autor Seq", 320
 # - Radio de búsqueda (círculo amarillo)
 # - Puntos encontrados (marcadores verdes)
 # - Conexiones KNN (líneas azules)
+#
+# ================================================================
+# 8. INSTRUCCIONES DE USO PARA LA PRESENTACIÓN
+# ================================================================
+#
+# PASO 1: EJECUTAR CREACIÓN DE TABLAS
+# ------------------------------------
+# Ejecutar las siguientes sentencias en orden:
+# 1. CREATE TABLE books_bpt_1k
+# 2. CREATE TABLE books_hash_1k  
+# 3. CREATE TABLE books_seq_1k
+# 4. CREATE TABLE coords_rtree_10k_rtree
+#
+# PASO 2: EJECUTAR CONSULTAS DE DEMOSTRACIÓN
+# -----------------------------------------
+# Sección 1: B+ Tree (líneas 66-70)
+# Sección 2: Hash (líneas 85-89)
+# Sección 3: Sequential (líneas 104-108)
+# Sección 4: R-Tree (líneas 119-133) - ¡Activan visualización!
+#
+# PASO 3: COMPARAR RENDIMIENTO
+# -------------------------------
+# Ejecutar las consultas comparativas (líneas 148-155)
+# Observar:
+# - Tiempo de ejecución (ms)
+# - Operaciones I/O (lecturas/escrituras)
+# - Eficiencia según tipo de índice
+#
+# PASO 4: DEMOSTRACIÓN DE INSERCIÓN
+# ----------------------------------
+# Ejecutar INSERT statements (líneas 138-142)
+# Mostrar cómo diferentes índices manejan escrituras
+#
+# NOTAS IMPORTANTES:
+# - Las consultas R-Tree activan visualización automática
+# - El frontend mostrará gráficos espaciales interactivos
+# - Comparar métricas entre diferentes tipos de índices
+# - Demostrar escalabilidad y eficiencia
 #
 # ================================================================
 # FIN DEL ARCHIVO DE DEMOSTRACIÓN
