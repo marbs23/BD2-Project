@@ -5,9 +5,9 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   optimizeDeps: {
-    // Remover force: true para evitar re-optimizaciones constantes
-    // Agregar exclusiones si es necesario
-    exclude: [],
+    // Forzar optimización más rápida
+    force: false,
+    exclude: ['@radix-ui/react-*'],
   },
   server: {
     fs: {
@@ -23,4 +23,7 @@ export default defineConfig({
       external: [],
     },
   },
+  esbuild: {
+    target: 'esnext'
+  }
 })
